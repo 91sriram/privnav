@@ -1169,6 +1169,112 @@ svg.leaflet-image-layer.leaflet-interactive path {
     pointer-events: auto !important;
   }
 
+
+  /* ── SEARCH MODAL ───────────────────────────────────── */
+  #search-modal-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 2000;
+    align-items: flex-end;
+    justify-content: center;
+  }
+  #search-modal-backdrop.open {
+    display: flex;
+  }
+  #search-modal {
+    background: var(--surface);
+    border-radius: 16px 16px 0 0;
+    width: 100%;
+    max-width: 600px;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-height: 80vh;
+  }
+  #search-modal-title {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+    text-align: center;
+  }
+  #search-modal-input {
+    width: 100%;
+    background: var(--bg);
+    border: 2px solid var(--accent);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-family: var(--font-ui);
+    font-size: 16px;
+    padding: 12px 14px;
+    outline: none;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+  #search-modal-results {
+    overflow-y: auto;
+    max-height: 50vh;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .modal-result-item {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+    cursor: pointer;
+  }
+  .modal-result-item:active { background: var(--border); }
+  .modal-result-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .modal-result-addr {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #search-modal-cancel {
+    background: var(--border);
+    border: none;
+    border-radius: var(--radius);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 10px;
+    cursor: pointer;
+    width: 100%;
+  }
+  /* Replace text inputs with tappable buttons in panel */
+  .route-tap-btn {
+    flex: 1;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 7px 10px;
+    text-align: left;
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .route-tap-btn.set {
+    color: var(--text);
+    border-color: var(--accent);
+  }
+
   /* LEAFLET OVERRIDES */
   .leaflet-control-zoom {
     border: 1px solid var(--border) !important;
@@ -1372,30 +1478,14 @@ svg.leaflet-image-layer.leaflet-interactive path {
           <div class="route-input-wrap">
             <div class="route-input-row">
               <div class="route-dot origin"></div>
-              <div class="search-wrap" style="flex:1;position:relative">
-                <input type="search" id="origin-input" class="search-input"
-                  placeholder="Type origin or tap map"
-                  oninput="onOriginInput(this.value)"
-                  onfocus="mapClickMode=null"
-                  inputmode="search"
-                  autocomplete="off" autocorrect="off" spellcheck="false"/>
-                <div class="search-spinner" id="origin-spinner"></div>
-                <div class="search-results" id="origin-results"></div>
-              </div>
+              <button class="route-tap-btn" id="origin-input"
+                onclick="openSearchModal('origin')">Tap map or tap here to search</button>
               <button class="btn-icon" title="Use current GPS position" onclick="useGpsAsOrigin()">◎</button>
             </div>
             <div class="route-input-row">
               <div class="route-dot dest"></div>
-              <div class="search-wrap" style="flex:1;position:relative">
-                <input type="search" id="dest-input" class="search-input"
-                  placeholder="Type destination or tap map"
-                  oninput="onDestInput(this.value)"
-                  onfocus="mapClickMode=null"
-                  inputmode="search"
-                  autocomplete="off" autocorrect="off" spellcheck="false"/>
-                <div class="search-spinner" id="dest-spinner"></div>
-                <div class="search-results" id="dest-results"></div>
-              </div>
+              <button class="route-tap-btn" id="dest-input"
+                onclick="openSearchModal('dest')">Tap map or tap here to search</button>
               <button class="btn-icon" title="Clear destination" onclick="clearDest()">✕</button>
             </div>
           </div>
@@ -1837,11 +1927,15 @@ function initMapClickHandler() {
 
     if (mapClickMode === 'origin') {
       originLat = lat; originLng = lng;
-      document.getElementById('origin-input').value = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+      var ob = document.getElementById('origin-input');
+      ob.textContent = lat.toFixed(5) + ', ' + lng.toFixed(5);
+      ob.classList.add('set');
       addPinMarker(lat, lng, 'origin');
     } else if (mapClickMode === 'dest') {
       destLat = lat; destLng = lng;
-      document.getElementById('dest-input').value = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+      var db = document.getElementById('dest-input');
+      db.textContent = lat.toFixed(5) + ', ' + lng.toFixed(5);
+      db.classList.add('set');
       addPinMarker(lat, lng, 'dest');
     }
 
@@ -1890,7 +1984,9 @@ function addPinMarker(lat, lng, type) {
 function useGpsAsOrigin() {
   if (!userLat) { alert('Get your GPS position first.'); return; }
   originLat = userLat; originLng = userLng;
-  document.getElementById('origin-input').value = `${userLat.toFixed(5)}, ${userLng.toFixed(5)}`;
+  var ob = document.getElementById('origin-input');
+  ob.textContent = userLat.toFixed(5) + ', ' + userLng.toFixed(5);
+  ob.classList.add('set');
   addPinMarker(userLat, userLng, 'origin');
   mapClickMode = 'dest';
   showMapHint('Now tap map to set destination');
@@ -1899,8 +1995,9 @@ function useGpsAsOrigin() {
 
 function clearDest() {
   destLat = null; destLng = null;
-  document.getElementById('dest-input').value = '';
-  document.getElementById('dest-results').classList.remove('open');
+  var db = document.getElementById('dest-input');
+  db.textContent = 'Tap map or tap here to search';
+  db.classList.remove('set');
   if (destPin) { map.removeLayer(destPin); destPin = null; }
   if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
   document.getElementById('route-summary').style.display = 'none';
@@ -2635,6 +2732,116 @@ document.addEventListener('click', function(e) {
   }
 });
 
+
+// ── SEARCH MODAL ──────────────────────────────────────────
+let searchModalTarget = null; // 'origin' or 'dest'
+let modalDebounce     = null;
+
+function openSearchModal(target) {
+  searchModalTarget = target;
+  const title = target === 'origin' ? 'Set Origin' : 'Set Destination';
+  document.getElementById('search-modal-title').textContent = title;
+  document.getElementById('search-modal-input').value = '';
+  document.getElementById('search-modal-results').innerHTML = '';
+  document.getElementById('search-modal-backdrop').classList.add('open');
+
+  // Focus input after short delay so modal animation completes
+  setTimeout(function() {
+    var inp = document.getElementById('search-modal-input');
+    inp.focus();
+    inp.click();
+  }, 100);
+}
+
+function closeSearchModal() {
+  document.getElementById('search-modal-backdrop').classList.remove('open');
+  document.getElementById('search-modal-input').blur();
+  searchModalTarget = null;
+}
+
+// Close on backdrop tap
+document.getElementById('search-modal-backdrop').addEventListener('click', function(e) {
+  if (e.target === this) closeSearchModal();
+});
+
+// Live search as user types
+document.getElementById('search-modal-input').addEventListener('input', function() {
+  const q = this.value.trim();
+  clearTimeout(modalDebounce);
+  if (q.length < 3) {
+    document.getElementById('search-modal-results').innerHTML = '';
+    return;
+  }
+  modalDebounce = setTimeout(function() { modalNominatimSearch(q); }, 400);
+});
+
+async function modalNominatimSearch(query) {
+  const resultsEl = document.getElementById('search-modal-results');
+  resultsEl.innerHTML = '<div style="color:var(--muted);font-size:11px;padding:8px;text-align:center">Searching…</div>';
+
+  try {
+    const url = 'https://nominatim.openstreetmap.org/search' +
+      '?q=' + encodeURIComponent(query) +
+      '&format=json&limit=6' +
+      '&viewbox=' + CHENNAI_VIEWBOX +
+      '&bounded=0&addressdetails=1&accept-language=en';
+
+    const r = await fetch(url, {
+      headers: { 'User-Agent': 'PrivNav/1.0 (private navigation app)' }
+    });
+    if (!r.ok) throw new Error('Nominatim ' + r.status);
+    const results = await r.json();
+
+    resultsEl.innerHTML = '';
+    if (results.length === 0) {
+      resultsEl.innerHTML = '<div style="color:var(--muted);font-size:11px;padding:8px;text-align:center">No results found</div>';
+      return;
+    }
+
+    results.forEach(function(place) {
+      const name    = place.display_name.split(',')[0];
+      const addr    = place.display_name;
+      const lat     = parseFloat(place.lat);
+      const lng     = parseFloat(place.lon);
+
+      const item = document.createElement('div');
+      item.className = 'modal-result-item';
+      item.innerHTML =
+        '<div class="modal-result-name">' + name + '</div>' +
+        '<div class="modal-result-addr">' + addr + '</div>';
+
+      item.addEventListener('click', function() {
+        selectModalResult(lat, lng, name);
+      });
+      resultsEl.appendChild(item);
+    });
+
+  } catch(e) {
+    resultsEl.innerHTML = '<div style="color:var(--jam);font-size:11px;padding:8px">Search failed — check connection</div>';
+  }
+}
+
+function selectModalResult(lat, lng, name) {
+  if (searchModalTarget === 'origin') {
+    originLat = lat; originLng = lng;
+    var btn = document.getElementById('origin-input');
+    btn.textContent = name;
+    btn.classList.add('set');
+    addPinMarker(lat, lng, 'origin');
+    map.setView([lat, lng], 14, { animate: true });
+  } else {
+    destLat = lat; destLng = lng;
+    var btn = document.getElementById('dest-input');
+    btn.textContent = name;
+    btn.classList.add('set');
+    addPinMarker(lat, lng, 'dest');
+    map.setView([lat, lng], 14, { animate: true });
+  }
+  closeSearchModal();
+  checkRouteReady();
+  mapClickMode = null;
+}
+
 // ── BOOT ─────────────────────────────────────────────────
 initMap();
 </script>
@@ -2648,5 +2855,19 @@ if ('serviceWorker' in navigator) {
   });
 }
 </script>
+
+<!-- SEARCH MODAL — sits above everything, outside Leaflet entirely -->
+<div id="search-modal-backdrop">
+  <div id="search-modal">
+    <div id="search-modal-title">Set location</div>
+    <input type="search" id="search-modal-input"
+      placeholder="Type a place name or address…"
+      autocomplete="off" autocorrect="off" autocapitalize="off"
+      spellcheck="false" enterkeyhint="search"/>
+    <div id="search-modal-results"></div>
+    <button id="search-modal-cancel" onclick="closeSearchModal()">Cancel</button>
+  </div>
+</div>
+
 </body>
 </html>
