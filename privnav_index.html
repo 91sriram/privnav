@@ -1478,16 +1478,40 @@ svg.leaflet-image-layer.leaflet-interactive path {
           <div class="route-input-wrap">
             <div class="route-input-row">
               <div class="route-dot origin"></div>
-              <button class="route-tap-btn" id="origin-input"
-                onclick="openTestSearch('origin')">Tap map or tap here to search</button>
+              <input
+                id="origin-input"
+                type="text"
+                inputmode="search"
+                enterkeyhint="search"
+                placeholder="Type origin or tap map"
+                autocomplete="off"
+                autocorrect="off"
+                autocapitalize="off"
+                spellcheck="false"
+                style="flex:1;font-size:14px;padding:8px 10px;background:#0d0f14;border:1px solid #232733;border-radius:6px;color:#c8cdd8;outline:none;min-width:0;"
+                oninput="onDirectInput(this.value,'origin')"
+              />
               <button class="btn-icon" title="Use current GPS position" onclick="useGpsAsOrigin()">◎</button>
             </div>
+            <div id="origin-results" style="display:none;position:relative;z-index:1100;background:#151820;border:1px solid #232733;border-radius:0 0 6px 6px;max-height:180px;overflow-y:auto;"></div>
             <div class="route-input-row">
               <div class="route-dot dest"></div>
-              <button class="route-tap-btn" id="dest-input"
-                onclick="openTestSearch('dest')">Tap map or tap here to search</button>
+              <input
+                id="dest-input"
+                type="text"
+                inputmode="search"
+                enterkeyhint="search"
+                placeholder="Type destination or tap map"
+                autocomplete="off"
+                autocorrect="off"
+                autocapitalize="off"
+                spellcheck="false"
+                style="flex:1;font-size:14px;padding:8px 10px;background:#0d0f14;border:1px solid #232733;border-radius:6px;color:#c8cdd8;outline:none;min-width:0;"
+                oninput="onDirectInput(this.value,'dest')"
+              />
               <button class="btn-icon" title="Clear destination" onclick="clearDest()">✕</button>
             </div>
+            <div id="dest-results" style="display:none;position:relative;z-index:1100;background:#151820;border:1px solid #232733;border-radius:0 0 6px 6px;max-height:180px;overflow-y:auto;"></div>
           </div>
 
           <div style="margin-top:6px;font-size:10px;color:var(--muted)">
@@ -1927,15 +1951,11 @@ function initMapClickHandler() {
 
     if (mapClickMode === 'origin') {
       originLat = lat; originLng = lng;
-      var ob = document.getElementById('origin-input');
-      ob.textContent = lat.toFixed(5) + ', ' + lng.toFixed(5);
-      ob.classList.add('set');
+      document.getElementById('origin-input').value = lat.toFixed(5) + ', ' + lng.toFixed(5);
       addPinMarker(lat, lng, 'origin');
     } else if (mapClickMode === 'dest') {
       destLat = lat; destLng = lng;
-      var db = document.getElementById('dest-input');
-      db.textContent = lat.toFixed(5) + ', ' + lng.toFixed(5);
-      db.classList.add('set');
+      document.getElementById('dest-input').value = lat.toFixed(5) + ', ' + lng.toFixed(5);
       addPinMarker(lat, lng, 'dest');
     }
 
@@ -1984,9 +2004,7 @@ function addPinMarker(lat, lng, type) {
 function useGpsAsOrigin() {
   if (!userLat) { alert('Get your GPS position first.'); return; }
   originLat = userLat; originLng = userLng;
-  var ob = document.getElementById('origin-input');
-  ob.textContent = userLat.toFixed(5) + ', ' + userLng.toFixed(5);
-  ob.classList.add('set');
+  document.getElementById('origin-input').value = userLat.toFixed(5) + ', ' + userLng.toFixed(5);
   addPinMarker(userLat, userLng, 'origin');
   mapClickMode = 'dest';
   showMapHint('Now tap map to set destination');
@@ -1995,9 +2013,8 @@ function useGpsAsOrigin() {
 
 function clearDest() {
   destLat = null; destLng = null;
-  var db = document.getElementById('dest-input');
-  db.textContent = 'Tap map or tap here to search';
-  db.classList.remove('set');
+  document.getElementById('dest-input').value = '';
+  document.getElementById('dest-results').style.display = 'none';
   if (destPin) { map.removeLayer(destPin); destPin = null; }
   if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
   document.getElementById('route-summary').style.display = 'none';
@@ -2935,6 +2952,80 @@ async function runTestSearch(query) {
     });
   } catch(e) {
     resultsEl.innerHTML = '<div style="color:#e74c3c;font-size:12px;padding:8px">Error: ' + e.message + '</div>';
+  }
+}
+
+
+// ── DIRECT INPUT HANDLER ──────────────────────────────────
+let directDebounce = null;
+
+function onDirectInput(val, target) {
+  clearTimeout(directDebounce);
+  var resultsId = target + '-results';
+  var resultsEl = document.getElementById(resultsId);
+
+  if (val.trim().length < 3) {
+    resultsEl.style.display = 'none';
+    resultsEl.innerHTML = '';
+    return;
+  }
+
+  directDebounce = setTimeout(function() {
+    directNominatimSearch(val.trim(), target, resultsEl);
+  }, 500);
+}
+
+async function directNominatimSearch(query, target, resultsEl) {
+  resultsEl.innerHTML = '<div style="color:#555e72;font-size:11px;padding:8px;text-align:center">Searching…</div>';
+  resultsEl.style.display = 'block';
+
+  try {
+    var url = 'https://nominatim.openstreetmap.org/search' +
+      '?q=' + encodeURIComponent(query) +
+      '&format=json&limit=5&viewbox=79.7,12.4,80.6,13.4&bounded=0&addressdetails=1&accept-language=en';
+
+    var r = await fetch(url, { headers: { 'User-Agent': 'PrivNav/1.0' } });
+    var results = await r.json();
+    resultsEl.innerHTML = '';
+
+    if (results.length === 0) {
+      resultsEl.innerHTML = '<div style="color:#555e72;font-size:11px;padding:8px;text-align:center">No results</div>';
+      return;
+    }
+
+    results.forEach(function(place) {
+      var name = place.display_name.split(',')[0];
+      var lat  = parseFloat(place.lat);
+      var lng  = parseFloat(place.lon);
+      var full = place.display_name;
+
+      var item = document.createElement('div');
+      item.style.cssText = 'padding:9px 10px;cursor:pointer;border-bottom:1px solid #232733;';
+      item.innerHTML =
+        '<div style="font-size:12px;font-weight:600;color:#c8cdd8">' + name + '</div>' +
+        '<div style="font-size:10px;color:#555e72;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + full + '</div>';
+
+      item.addEventListener('click', function() {
+        var inp = document.getElementById(target + '-input');
+        inp.value = name;
+        resultsEl.style.display = 'none';
+
+        if (target === 'origin') {
+          originLat = lat; originLng = lng;
+          addPinMarker(lat, lng, 'origin');
+        } else {
+          destLat = lat; destLng = lng;
+          addPinMarker(lat, lng, 'dest');
+        }
+        map.setView([lat, lng], 14, { animate: true });
+        checkRouteReady();
+      });
+
+      resultsEl.appendChild(item);
+    });
+
+  } catch(e) {
+    resultsEl.innerHTML = '<div style="color:#e74c3c;font-size:11px;padding:8px">Search failed</div>';
   }
 }
 
