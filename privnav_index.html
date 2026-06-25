@@ -795,8 +795,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 
   /* ── SIDE PANEL ─────────────────────────────────────── */
   #panel {
-    position: absolute;
-    top: 10px;
+    position: fixed;
+    top: 54px;
     right: 10px;
     width: var(--panel-w);
     background: var(--surface);
@@ -1147,6 +1147,28 @@ svg.leaflet-image-layer.leaflet-interactive path {
   .search-spinner.show { display: block; }
 
 
+
+  /* ── PANEL TOUCH FIX ────────────────────────────────── */
+  #panel {
+    touch-action: auto !important;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+  #panel * {
+    touch-action: auto !important;
+  }
+  #panel input {
+    -webkit-user-select: text;
+    user-select: text;
+    touch-action: manipulation !important;
+    cursor: text;
+    pointer-events: auto !important;
+  }
+  .search-wrap {
+    touch-action: manipulation !important;
+    pointer-events: auto !important;
+  }
+
   /* LEAFLET OVERRIDES */
   .leaflet-control-zoom {
     border: 1px solid var(--border) !important;
@@ -1283,6 +1305,9 @@ svg.leaflet-image-layer.leaflet-interactive path {
     <div id="loader"><div class="spinner"></div></div>
     <div id="map-hint"></div>
     <button id="panel-toggle" onclick="togglePanel()">⚙ Controls</button>
+
+
+  </div>
 
     <div id="panel">
       <div id="panel-header">
@@ -1457,7 +1482,6 @@ svg.leaflet-image-layer.leaflet-interactive path {
 
       </div>
     </div>
-  </div>
 </div>
 
 <script>
@@ -1789,10 +1813,17 @@ const CHENNAI_BOUNDS = {
 
 // ── MAP CLICK HANDLER ────────────────────────────────────
 function initMapClickHandler() {
-  // Prevent map clicks firing when tapping panel inputs
-  document.querySelectorAll('.search-wrap input').forEach(function(inp) {
-    inp.addEventListener('click', function(e) { e.stopPropagation(); });
-    inp.addEventListener('touchend', function(e) { e.stopPropagation(); });
+  // Use Leaflet's native method to stop map events on panel
+  var panelEl = document.getElementById('panel');
+  L.DomEvent.disableClickPropagation(panelEl);
+  L.DomEvent.disableScrollPropagation(panelEl);
+
+  // Also explicitly stop touch events on inputs from reaching Leaflet
+  document.querySelectorAll('#panel input').forEach(function(inp) {
+    L.DomEvent.disableClickPropagation(inp);
+    inp.addEventListener('touchstart', function(e) { e.stopPropagation(); }, { passive: true });
+    inp.addEventListener('touchend',   function(e) { e.stopPropagation(); });
+    inp.addEventListener('click',      function(e) { e.stopPropagation(); });
   });
 
   map.on('click', function(e) {
