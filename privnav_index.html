@@ -1348,9 +1348,11 @@ svg.leaflet-image-layer.leaflet-interactive path {
             <div class="route-input-row">
               <div class="route-dot origin"></div>
               <div class="search-wrap" style="flex:1;position:relative">
-                <input type="text" id="origin-input" class="search-input"
+                <input type="search" id="origin-input" class="search-input"
                   placeholder="Type origin or tap map"
                   oninput="onOriginInput(this.value)"
+                  onfocus="mapClickMode=null"
+                  inputmode="search"
                   autocomplete="off" autocorrect="off" spellcheck="false"/>
                 <div class="search-spinner" id="origin-spinner"></div>
                 <div class="search-results" id="origin-results"></div>
@@ -1360,9 +1362,11 @@ svg.leaflet-image-layer.leaflet-interactive path {
             <div class="route-input-row">
               <div class="route-dot dest"></div>
               <div class="search-wrap" style="flex:1;position:relative">
-                <input type="text" id="dest-input" class="search-input"
+                <input type="search" id="dest-input" class="search-input"
                   placeholder="Type destination or tap map"
                   oninput="onDestInput(this.value)"
+                  onfocus="mapClickMode=null"
+                  inputmode="search"
                   autocomplete="off" autocorrect="off" spellcheck="false"/>
                 <div class="search-spinner" id="dest-spinner"></div>
                 <div class="search-results" id="dest-results"></div>
@@ -1785,8 +1789,19 @@ const CHENNAI_BOUNDS = {
 
 // ── MAP CLICK HANDLER ────────────────────────────────────
 function initMapClickHandler() {
+  // Prevent map clicks firing when tapping panel inputs
+  document.querySelectorAll('.search-wrap input').forEach(function(inp) {
+    inp.addEventListener('click', function(e) { e.stopPropagation(); });
+    inp.addEventListener('touchend', function(e) { e.stopPropagation(); });
+  });
+
   map.on('click', function(e) {
-    if (!mapClickMode) return;
+    // If no mode set, enter origin pick if no origin yet, else dest
+    if (!mapClickMode) {
+      if (originLat === null) mapClickMode = 'origin';
+      else if (destLat === null) mapClickMode = 'dest';
+      else return;
+    }
     const { lat, lng } = e.latlng;
 
     if (mapClickMode === 'origin') {
@@ -1806,9 +1821,11 @@ function initMapClickHandler() {
     checkRouteReady();
   });
 
-  // Start in origin-pick mode immediately
-  mapClickMode = 'origin';
-  showMapHint('Tap map to set origin');
+  // Don't auto-enter click mode — user can type or tap map
+  mapClickMode = null;
+  // Show subtle hint
+  showMapHint('Tap map to set origin or type above');
+  setTimeout(hideMapHint, 3000);
 }
 
 let originPin = null, destPin = null;
