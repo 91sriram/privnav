@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="64" fill="#0d0f14"/>
+  <rect width="512" height="512" rx="64" fill="#151820"/>
+  <text x="50%" y="55%" dominant-baseline="middle" text-anchor="middle"
+    font-family="monospace" font-weight="bold" font-size="230"
+    fill="#4f8ef7">P</text>
+  <text x="50%" y="78%" dominant-baseline="middle" text-anchor="middle"
+    font-family="monospace" font-size="64"
+    fill="#555e72" letter-spacing="3">NAV</text>
+</svg>
