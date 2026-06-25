@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Keyboard Test</title>
+<style>
+  body { background: #111; color: #fff; font-family: sans-serif; padding: 20px; }
+  input { font-size: 18px; padding: 12px; width: 100%; margin: 10px 0; background: #222; color: #fff; border: 2px solid #4f8ef7; border-radius: 8px; box-sizing: border-box; }
+  p { color: #aaa; font-size: 14px; }
+</style>
+</head>
+<body>
+  <p>Tap each input below. Does the keyboard appear?</p>
+  <input type="text" placeholder="Test 1 — type=text">
+  <input type="search" placeholder="Test 2 — type=search">
+  <input type="text" inputmode="search" placeholder="Test 3 — inputmode=search">
+  <input type="text" readonly placeholder="Test 4 — readonly (should NOT work)">
+</body>
+</html>
