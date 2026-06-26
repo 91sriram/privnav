@@ -10,7 +10,7 @@
 <meta name="theme-color" content="#0d0f14">
 <link rel="apple-touch-icon" href="icon-192.png">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>PrivNav — Traffic Overlay</title>
+<title>PrivNav v8 — Traffic Overlay</title>
 
 <style>/* required styles */
 
@@ -2152,8 +2152,16 @@ async function fetchRealRoute(key) {
     '&key=' + GH_KEY;
 
   const r = await fetch(url);
-  if (!r.ok) throw new Error('GraphHopper API ' + r.status + ': ' + await r.text());
-  return await r.json();
+  if (!r.ok) {
+    var errText = await r.text();
+    console.error('GH error response:', errText);
+    throw new Error('GraphHopper API ' + r.status + ': ' + errText);
+  }
+  var ghData = await r.json();
+  console.log('GH response keys:', Object.keys(ghData));
+  if (ghData.paths) console.log('GH paths count:', ghData.paths.length);
+  if (ghData.message) console.error('GH message:', ghData.message);
+  return ghData;
 }
 
 function renderRoute(data) {
