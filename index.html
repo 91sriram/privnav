@@ -2310,9 +2310,9 @@ function extractNavSteps(routeData) {
   var path = routeData.paths && routeData.paths[0];
   if (!path) return steps;
 
-  // Collect route coords
+  // allRouteCoords already set by startNavigation — just verify
   var coords = path.points && path.points.coordinates;
-  if (coords) {
+  if (coords && allRouteCoords.length === 0) {
     allRouteCoords = coords.map(function(c) { return [c[1], c[0]]; });
   }
 
@@ -2374,12 +2374,9 @@ async function startNavigation() {
   navCurrentStep = 0;
   navSteps       = extractNavSteps(currentRouteData);
   allRouteCoords = [];
-  // Re-extract coords
-  for (const leg of currentRouteData.routes[0].legs) {
-    for (const pt of leg.points) {
-      allRouteCoords.push([pt.latitude, pt.longitude]);
-    }
-  }
+  // Re-extract coords from GraphHopper paths[0].points
+  var ghCoords = currentRouteData.paths[0].points.coordinates;
+  allRouteCoords = ghCoords.map(function(c) { return [c[1], c[0]]; });
 
   // Update button
   const btn = document.getElementById('nav-btn');
@@ -2723,27 +2720,9 @@ function trafficColourForIndex(idx) {
 
 // Parse TomTom traffic sections into segment ranges (#5)
 function parseTrafficSegments(data) {
+  // GraphHopper OSM routing has no traffic section data
+  // TomTom traffic tile overlay handles visual traffic colouring separately
   trafficSegments = [];
-  const route = data.routes[0];
-  if (!route.sections) return;
-
-  // Build cumulative point count per leg to map section offsets to coord indices
-  for (const section of route.sections) {
-    if (section.sectionType !== 'TRAFFIC') continue;
-    const startIdx = section.startPointIndex || 0;
-    const endIdx   = section.endPointIndex   || 0;
-    // delayRatio from magnitudeOfDelay or simpleCategory
-    let delayRatio = 0;
-    if (section.delayInSeconds && section.effectiveSpeedInKmh) {
-      // Estimate ratio from delay
-      delayRatio = Math.min(1, section.delayInSeconds / 120); // 2min+ = max
-    } else if (section.simpleCategory === 'JAM') {
-      delayRatio = 0.7;
-    } else if (section.magnitudeOfDelay) {
-      delayRatio = Math.min(1, section.magnitudeOfDelay / 4);
-    }
-    trafficSegments.push({ startIdx, endIdx, delayRatio });
-  }
 }
 
 // ── SPEECH ────────────────────────────────────────────────
