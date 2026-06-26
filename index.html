@@ -10,7 +10,7 @@
 <meta name="theme-color" content="#0d0f14">
 <link rel="apple-touch-icon" href="icon-192.png">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>PrivNav v8 — Traffic Overlay</title>
+<title>PrivNav v9 — Traffic Overlay</title>
 
 <style>/* required styles */
 
@@ -2147,8 +2147,6 @@ async function fetchRealRoute(key) {
     '&instructions=true' +
     '&points_encoded=false' +
     '&locale=en' +
-    '&ch.disable=true' +
-    '&weighting=fastest' +
     '&key=' + GH_KEY;
 
   const r = await fetch(url);
