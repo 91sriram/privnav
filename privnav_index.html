@@ -1042,7 +1042,9 @@ svg.leaflet-image-layer.leaflet-interactive path {
     position: absolute;
     top: 10px;
     left: 10px;
-    width: 280px;
+    right: 10px;
+    width: auto;
+    max-width: 480px;
     z-index: 950;
     flex-direction: column;
     gap: 6px;
@@ -1052,17 +1054,17 @@ svg.leaflet-image-layer.leaflet-interactive path {
   #nav-current {
     background: var(--accent);
     border-radius: var(--radius);
-    padding: 12px 14px;
+    padding: 16px 18px;
     display: flex;
     align-items: center;
     gap: 12px;
     box-shadow: 0 4px 16px rgba(0,0,0,0.5);
     pointer-events: auto;
   }
-  #nav-arrow { font-size: 36px; flex-shrink: 0; line-height: 1; color: #fff; }
+  #nav-arrow { font-size: 48px; flex-shrink: 0; line-height: 1; color: #fff; }
   #nav-text { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
-  #nav-instruction { font-size: 14px; font-weight: 700; color: #fff; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  #nav-distance { font-family: var(--font-mono); font-size: 12px; color: rgba(255,255,255,0.8); }
+  #nav-instruction { font-size: 19px; font-weight: 800; color: #fff; line-height: 1.25; }
+  #nav-distance { font-family: var(--font-mono); font-size: 16px; font-weight: 700; color: rgba(255,255,255,0.9); }
   #nav-next { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 8px; pointer-events: auto; }
   #nav-next-arrow { font-size: 16px; flex-shrink: 0; }
   #nav-next-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -1275,6 +1277,23 @@ svg.leaflet-image-layer.leaflet-interactive path {
     border-color: var(--accent);
   }
 
+
+  #nav-exit-btn {
+    background: var(--jam);
+    border: none;
+    border-radius: var(--radius);
+    color: #fff;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 700;
+    padding: 12px;
+    cursor: pointer;
+    pointer-events: auto;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+    width: 100%;
+  }
+  #nav-exit-btn:active { opacity: 0.8; }
+
   /* LEAFLET OVERRIDES */
   .leaflet-control-zoom {
     border: 1px solid var(--border) !important;
@@ -1402,6 +1421,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
           <div class="np-label">Step</div>
         </div>
       </div>
+      <button id="nav-exit-btn" onclick="stopNavigation()">✕ Exit Navigation</button>
     </div>
 
     <!-- OFF ROUTE BANNER -->
@@ -1615,6 +1635,7 @@ function initMap() {
     zoom: 13,
     zoomControl: true,
     attributionControl: true,
+    tap: false,  // CRITICAL: Leaflet's tap handler breaks input focus on mobile
   });
 
   // OSM base tiles — dark Carto variant
@@ -1913,6 +1934,7 @@ function togglePanel() {
 let originLat = null, originLng = null;
 let destLat   = null, destLng   = null;
 let routeLayer = null;
+let routeSegLayers = [];
 let mapClickMode = null; // 'origin' | 'dest' | null
 let refreshTimer = null;
 let refreshInterval = null;
@@ -2118,6 +2140,7 @@ async function fetchRealRoute(key) {
     `&computeTravelTimeFor=all` +
     `&instructionsType=text` +
     `&language=en-GB` +
+    `&sectionType=traffic` +
     `&routeRepresentation=polyline`;
 
   const r = await fetch(url);
@@ -2128,6 +2151,12 @@ async function fetchRealRoute(key) {
 function renderRoute(data) {
   currentRouteData = data; // store for navigation
   document.getElementById('nav-btn').style.display = 'flex';
+
+  // Store totals for stable ETA (#4)
+  const sm = data.routes[0].summary;
+  routeTotalTimeSecs = sm.travelTimeInSeconds || 0;
+  routeTotalDistance = sm.lengthInMeters || 0;
+  parseTrafficSegments(data); // (#5) traffic colouring
   // Clear previous route
   if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
 
@@ -2145,17 +2174,29 @@ function renderRoute(data) {
     }
   }
 
-  // Draw route line
-  routeLayer = L.polyline(points, {
-    color: '#4f8ef7',
-    weight: 5,
-    opacity: 0.85,
-    lineJoin: 'round',
-    lineCap: 'round',
-  }).addTo(map);
+  // Draw route line — coloured by traffic if available (#5)
+  if (routeLayer) { map.removeLayer(routeLayer); }
+  if (routeSegLayers) { routeSegLayers.forEach(function(l){ map.removeLayer(l); }); }
+  routeSegLayers = [];
+
+  if (trafficSegments && trafficSegments.length > 0) {
+    for (let i = 1; i < points.length; i++) {
+      const colour = trafficColourForIndex(i);
+      const seg = L.polyline([points[i-1], points[i]], {
+        color: colour, weight: 5, opacity: 0.85, lineCap: 'round',
+      }).addTo(map);
+      routeSegLayers.push(seg);
+    }
+    routeLayer = routeSegLayers[0]; // reference for bounds
+  } else {
+    routeLayer = L.polyline(points, {
+      color: '#4f8ef7', weight: 5, opacity: 0.85, lineJoin: 'round', lineCap: 'round',
+    }).addTo(map);
+  }
 
   // Fit map to route
-  map.fitBounds(routeLayer.getBounds(), { padding: [40, 40] });
+  const allBounds = L.latLngBounds(points);
+  map.fitBounds(allBounds, { padding: [40, 40] });
 
   // Update summary panel
   const travelMins  = Math.round(summary.travelTimeInSeconds / 60);
@@ -2243,6 +2284,9 @@ let navPolyline     = null; // remaining route line
 let allRouteCoords  = [];   // full route coords
 let wakeLock        = null;
 let offRouteCount   = 0;
+let routeTotalTimeSecs = 0;
+let routeTotalDistance = 0;
+let trafficSegments    = []; // for coloured route (#5)
 const OFF_ROUTE_THRESHOLD = 60;  // metres
 const OFF_ROUTE_STRIKES   = 3;   // consecutive misses before alert
 
@@ -2392,11 +2436,7 @@ async function startNavigation() {
   document.getElementById('nav-hud').classList.add('active');
 
   // Request wake lock so screen stays on
-  try {
-    if ('wakeLock' in navigator) {
-      wakeLock = await navigator.wakeLock.request('screen');
-    }
-  } catch(_) { /* wake lock not critical */ }
+  await acquireWakeLock();
 
   // Speak first instruction
   updateHUD(0, 0);
@@ -2447,12 +2487,12 @@ function onNavPosition(pos) {
   placeGpsMarker(lat, lng);
   followGPS(lat, lng);
 
-  if (!navSteps.length) return;
+  if (!navSteps.length || !allRouteCoords.length) return;
 
-  // Find closest point on route
+  // Find closest point on route — this drives EVERYTHING
   const { closestIdx, distToRoute } = findClosestRoutePoint(lat, lng);
 
-  // Off route detection
+  // ── OFF ROUTE DETECTION (#2) ──
   if (distToRoute > OFF_ROUTE_THRESHOLD) {
     offRouteCount++;
     if (offRouteCount >= OFF_ROUTE_STRIKES) {
@@ -2463,26 +2503,82 @@ function onNavPosition(pos) {
     document.getElementById('offroute-banner').style.display = 'none';
   }
 
-  // Advance step based on distance to next maneuver point
-  advanceStep(lat, lng);
-
-  // Remaining distance estimate
+  // ── REMAINING DISTANCE (#3) ──
+  // Distance from current position to end of route along the polyline
   const remainCoords = allRouteCoords.slice(closestIdx);
-  const remainDist   = polylineLength(remainCoords);
+  const remainDist   = polylineLength(remainCoords) +
+    haversine(lat, lng, allRouteCoords[closestIdx][0], allRouteCoords[closestIdx][1]);
 
-  // ETA from current speed or route summary
-  const speed = pos.coords.speed || 10; // m/s, default 36 km/h if unknown
-  const etaSecs = remainDist / (speed > 0.5 ? speed : 10);
+  // ── STEP SYNC BY POSITION (#2) ──
+  // Determine which step we're on based on our progress distance along route,
+  // NOT by distance to maneuver. This keeps steps correct even on detours.
+  const distFromStart = polylineLength(allRouteCoords.slice(0, closestIdx + 1));
+  syncStepToProgress(distFromStart);
+
+  // Distance to the NEXT maneuver point
+  let distToManeuver = 0;
+  const nextStep = navSteps[navCurrentStep];
+  if (nextStep && nextStep.distToNext > distFromStart) {
+    distToManeuver = nextStep.distToNext - distFromStart;
+  }
+  updateHUD(navCurrentStep, distToManeuver);
+  maybeAnnounce(distToManeuver);
+
+  // ── STABLE ETA FROM TOMTOM (#4) ──
+  // Use TomTom's traffic-aware travel time, scaled by fraction remaining.
+  // This is stable because it's based on the route's own estimate, not GPS speed.
+  const totalDist = routeTotalDistance || polylineLength(allRouteCoords);
+  const fracRemaining = totalDist > 0 ? (remainDist / totalDist) : 0;
+  const etaSecs = routeTotalTimeSecs * fracRemaining;
   const etaTime = new Date(Date.now() + etaSecs * 1000);
   const etaStr  = etaTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-  document.getElementById('np-eta').textContent        = etaStr;
+  document.getElementById('np-eta').textContent         = etaStr;
   document.getElementById('np-remain-dist').textContent = formatDist(remainDist);
   document.getElementById('np-step').textContent        =
     (navCurrentStep + 1) + '/' + navSteps.length;
 
-  // Draw remaining route
+  // Draw remaining route in traffic colours
   drawRemainingRoute(closestIdx);
+}
+
+// ── SYNC STEP TO PROGRESS DISTANCE (#2) ──
+// Steps have a distToNext = absolute offset from route start (metres).
+// We pick the step whose maneuver point is just ahead of our progress.
+function syncStepToProgress(distFromStart) {
+  let newStep = 0;
+  for (let i = 0; i < navSteps.length; i++) {
+    if (navSteps[i].distToNext <= distFromStart + 10) {
+      newStep = i + 1;
+    } else {
+      break;
+    }
+  }
+  newStep = Math.min(newStep, navSteps.length - 1);
+
+  if (newStep !== navCurrentStep) {
+    navCurrentStep = newStep;
+    // Announce the new step's instruction
+    const s = navSteps[navCurrentStep];
+    if (s) speak(s.instruction);
+    if (navCurrentStep >= navSteps.length - 1) {
+      speak('You have arrived at your destination');
+      setTimeout(stopNavigation, 4000);
+    }
+  }
+}
+
+// ── ANNOUNCE UPCOMING TURN (#2 distance based) ──
+let lastAnnounceStep = -1;
+function maybeAnnounce(distToManeuver) {
+  const step = navSteps[navCurrentStep];
+  if (!step) return;
+  // 200m pre-warning, announced once per step
+  if (distToManeuver > 50 && distToManeuver < 200 && lastAnnounceStep !== navCurrentStep) {
+    lastAnnounceStep = navCurrentStep;
+    const next = navSteps[navCurrentStep + 1];
+    if (next) speak('In 200 metres, ' + next.instruction);
+  }
 }
 
 function advanceStep(lat, lng) {
@@ -2587,15 +2683,75 @@ function haversine(lat1, lng1, lat2, lng2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
+let navSegLayers = [];
 function drawRemainingRoute(fromIdx) {
+  // Clear old segment layers
+  navSegLayers.forEach(function(l) { map.removeLayer(l); });
+  navSegLayers = [];
   if (navPolyline) { map.removeLayer(navPolyline); navPolyline = null; }
+
   const remaining = allRouteCoords.slice(fromIdx);
   if (remaining.length < 2) return;
-  navPolyline = L.polyline(remaining, {
-    color: '#4f8ef7',
-    weight: 6,
-    opacity: 0.9,
-  }).addTo(map);
+
+  // If we have traffic segments, colour the route by them (#5)
+  if (trafficSegments && trafficSegments.length > 0) {
+    drawColouredRoute(remaining, fromIdx);
+  } else {
+    // Fallback: single blue line
+    navPolyline = L.polyline(remaining, {
+      color: '#4f8ef7', weight: 6, opacity: 0.9,
+    }).addTo(map);
+  }
+}
+
+// Colour route segments by traffic delay severity (#5)
+function drawColouredRoute(coords, fromIdx) {
+  // trafficSegments: [{startIdx, endIdx, delayRatio}]
+  // Build a colour for each point index based on which segment it falls in
+  for (let i = 1; i < coords.length; i++) {
+    const globalIdx = fromIdx + i;
+    const colour = trafficColourForIndex(globalIdx);
+    const seg = L.polyline([coords[i-1], coords[i]], {
+      color: colour, weight: 6, opacity: 0.9, lineCap: 'round',
+    }).addTo(map);
+    navSegLayers.push(seg);
+  }
+}
+
+function trafficColourForIndex(idx) {
+  for (const seg of trafficSegments) {
+    if (idx >= seg.startIdx && idx <= seg.endIdx) {
+      if (seg.delayRatio >= 0.5) return '#e74c3c'; // heavy — red
+      if (seg.delayRatio >= 0.2) return '#f39c12'; // moderate — amber
+      return '#2ecc71'; // free flow — green
+    }
+  }
+  return '#4f8ef7'; // no data — blue
+}
+
+// Parse TomTom traffic sections into segment ranges (#5)
+function parseTrafficSegments(data) {
+  trafficSegments = [];
+  const route = data.routes[0];
+  if (!route.sections) return;
+
+  // Build cumulative point count per leg to map section offsets to coord indices
+  for (const section of route.sections) {
+    if (section.sectionType !== 'TRAFFIC') continue;
+    const startIdx = section.startPointIndex || 0;
+    const endIdx   = section.endPointIndex   || 0;
+    // delayRatio from magnitudeOfDelay or simpleCategory
+    let delayRatio = 0;
+    if (section.delayInSeconds && section.effectiveSpeedInKmh) {
+      // Estimate ratio from delay
+      delayRatio = Math.min(1, section.delayInSeconds / 120); // 2min+ = max
+    } else if (section.simpleCategory === 'JAM') {
+      delayRatio = 0.7;
+    } else if (section.magnitudeOfDelay) {
+      delayRatio = Math.min(1, section.magnitudeOfDelay / 4);
+    }
+    trafficSegments.push({ startIdx, endIdx, delayRatio });
+  }
 }
 
 // ── SPEECH ────────────────────────────────────────────────
@@ -3029,6 +3185,38 @@ async function directNominatimSearch(query, target, resultsEl) {
     resultsEl.innerHTML = '<div style="color:#e74c3c;font-size:11px;padding:8px">Search failed</div>';
   }
 }
+
+
+// ── WAKE LOCK MANAGEMENT (#6) ─────────────────────────────
+async function acquireWakeLock() {
+  try {
+    if ('wakeLock' in navigator) {
+      wakeLock = await navigator.wakeLock.request('screen');
+      // Re-acquire if the lock is released by the system
+      wakeLock.addEventListener('release', function() {
+        console.log('Wake lock released by system');
+      });
+    }
+  } catch(e) {
+    console.warn('Wake lock failed:', e.message);
+  }
+}
+
+// When page regains visibility (e.g. after a phone call), re-acquire (#6)
+document.addEventListener('visibilitychange', async function() {
+  if (document.visibilityState === 'visible' && navActive) {
+    // Re-acquire wake lock — it gets dropped when page is hidden
+    await acquireWakeLock();
+    // Also re-acquire GPS watch in case it was suspended
+    if (navWatchId === null) {
+      navWatchId = navigator.geolocation.watchPosition(
+        onNavPosition,
+        function(err) { console.warn('Nav GPS error:', err.message); },
+        { enableHighAccuracy: true, maximumAge: 3000, timeout: 30000 }
+      );
+    }
+  }
+});
 
 // ── BOOT ─────────────────────────────────────────────────
 initMap();
