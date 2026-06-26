@@ -2147,6 +2147,8 @@ async function fetchRealRoute(key) {
     '&instructions=true' +
     '&points_encoded=false' +
     '&locale=en' +
+    '&ch.disable=true' +
+    '&weighting=fastest' +
     '&key=' + GH_KEY;
 
   const r = await fetch(url);
@@ -2931,9 +2933,24 @@ function onDirectInput(val, target) {
   var resultsId = target + '-results';
   var resultsEl = document.getElementById(resultsId);
 
-  // If user is retyping destination, clear the old one immediately
+  // If user is retyping destination, clear map layers but NOT the input value
   if (target === 'dest') {
-    clearDestState();
+    // Only clear route/pins, not the text field itself
+    if (destPin) { map.removeLayer(destPin); destPin = null; }
+    destLat = null; destLng = null;
+    if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
+    if (typeof routeSegLayers !== 'undefined' && routeSegLayers) {
+      routeSegLayers.forEach(function(l){ map.removeLayer(l); });
+      routeSegLayers = [];
+    }
+    if (navPolyline) { map.removeLayer(navPolyline); navPolyline = null; }
+    currentRouteData = null;
+    allRouteCoords = [];
+    document.getElementById('route-summary').style.display = 'none';
+    document.getElementById('nav-btn').style.display = 'none';
+    document.getElementById('calc-route-btn').style.display = 'none';
+    document.getElementById('chaff-status').style.display = 'none';
+    stopRefreshTimer();
   }
 
   if (val.trim().length < 3) {
