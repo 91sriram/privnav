@@ -1990,6 +1990,7 @@ function initMapClickHandler() {
       document.getElementById('origin-input').value = lat.toFixed(5) + ', ' + lng.toFixed(5);
       addPinMarker(lat, lng, 'origin');
     } else if (mapClickMode === 'dest') {
+      clearDestState();
       destLat = lat; destLng = lng;
       document.getElementById('dest-input').value = lat.toFixed(5) + ', ' + lng.toFixed(5);
       addPinMarker(lat, lng, 'dest');
@@ -2048,16 +2049,7 @@ function useGpsAsOrigin() {
 }
 
 function clearDest() {
-  destLat = null; destLng = null;
-  document.getElementById('dest-input').value = '';
-  document.getElementById('dest-results').style.display = 'none';
-  if (destPin) { map.removeLayer(destPin); destPin = null; }
-  if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
-  document.getElementById('route-summary').style.display = 'none';
-  document.getElementById('chaff-status').style.display = 'none';
-  document.getElementById('refresh-bar-wrap').style.display = 'none';
-  document.getElementById('calc-route-btn').style.display = 'none';
-  stopRefreshTimer();
+  clearDestState();
   mapClickMode = 'dest';
   showMapHint('Tap map to set destination');
   checkRouteReady();
@@ -2476,24 +2468,35 @@ function stopNavigation() {
 
   if (wakeLock) { wakeLock.release(); wakeLock = null; }
 
+  // Hide HUD and restore panel
   document.getElementById('nav-hud').classList.remove('active');
-
-  // Stop heading-up rotation
-  stopHeadingUp();
-
-  // Restore panel
+  document.getElementById('offroute-banner').style.display = 'none';
+  document.getElementById('recentre-btn').classList.remove('visible');
   document.getElementById('panel').style.display = 'flex';
   document.getElementById('panel-toggle').style.display = 'block';
-  document.getElementById('recentre-btn').classList.remove('visible');
+
+  // Stop map following and rotation
   map.off('dragstart', disableFollowing);
   mapFollowing = false;
-  document.getElementById('offroute-banner').style.display = 'none';
+  stopHeadingUp();
 
-  const btn = document.getElementById('nav-btn');
+  // Reset nav button
+  var btn = document.getElementById('nav-btn');
   btn.textContent = '▶ Start Navigation';
   btn.classList.remove('stopping');
 
   window.speechSynthesis && window.speechSynthesis.cancel();
+
+  // Full clean slate — clear destination, route, and all state
+  clearDestState();
+  navSteps = [];
+  navCurrentStep = 0;
+  allRouteCoords = [];
+  offRouteCount = 0;
+  lastGpsLat = null;
+  lastGpsLng = null;
+  mapClickMode = 'origin';
+  showMapHint('Tap map to set origin');
 }
 
 // ── GPS POSITION HANDLER ──────────────────────────────────
@@ -2970,15 +2973,8 @@ function onDirectInput(val, target) {
   var resultsEl = document.getElementById(resultsId);
 
   // If user is retyping destination, clear the old one immediately
-  if (target === 'dest' && destLat !== null) {
-    destLat = null; destLng = null;
-    if (destPin) { map.removeLayer(destPin); destPin = null; }
-    if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
-    document.getElementById('route-summary').style.display = 'none';
-    document.getElementById('nav-btn').style.display = 'none';
-    document.getElementById('calc-route-btn').style.display = 'none';
-    document.getElementById('chaff-status').style.display = 'none';
-    stopRefreshTimer();
+  if (target === 'dest') {
+    clearDestState();
   }
 
   if (val.trim().length < 3) {
@@ -3061,26 +3057,7 @@ async function directNominatimSearch(query, target, resultsEl) {
           addPinMarker(lat, lng, 'origin');
         } else {
           // Clear previous destination completely before setting new one
-          destLat = null; destLng = null;
-          if (destPin) { map.removeLayer(destPin); destPin = null; }
-          if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
-          if (typeof routeSegLayers !== 'undefined' && routeSegLayers) {
-            routeSegLayers.forEach(function(l){ map.removeLayer(l); });
-            routeSegLayers = [];
-          }
-          if (navPolyline) { map.removeLayer(navPolyline); navPolyline = null; }
-          if (typeof navSegLayers !== 'undefined' && navSegLayers) {
-            navSegLayers.forEach(function(l){ map.removeLayer(l); });
-            navSegLayers = [];
-          }
-          document.getElementById('route-summary').style.display = 'none';
-          document.getElementById('nav-btn').style.display = 'none';
-          document.getElementById('chaff-status').style.display = 'none';
-          document.getElementById('calc-route-btn').style.display = 'none';
-          stopRefreshTimer();
-          currentRouteData = null;
-          allRouteCoords = [];
-          // Now set new destination
+          clearDestState();
           destLat = lat; destLng = lng;
           addPinMarker(lat, lng, 'dest');
         }
@@ -3275,6 +3252,46 @@ function preloadTilesForArea(lat, lng) {
     }
   });
   console.log('Preloading tiles for zoom levels', zooms, 'around', lat.toFixed(4), lng.toFixed(4));
+}
+
+
+// ── CLEAR ROUTE STATE ─────────────────────────────────────
+// Single function that clears everything route-related
+function clearRoute() {
+  // Remove map layers
+  if (routeLayer)    { map.removeLayer(routeLayer);    routeLayer = null; }
+  if (navPolyline)   { map.removeLayer(navPolyline);   navPolyline = null; }
+  if (typeof routeSegLayers !== 'undefined' && routeSegLayers) {
+    routeSegLayers.forEach(function(l){ map.removeLayer(l); });
+    routeSegLayers = [];
+  }
+  if (typeof navSegLayers !== 'undefined' && navSegLayers) {
+    navSegLayers.forEach(function(l){ map.removeLayer(l); });
+    navSegLayers = [];
+  }
+  // Clear route state
+  currentRouteData = null;
+  allRouteCoords   = [];
+  navSteps         = [];
+  navCurrentStep   = 0;
+  // Hide UI elements
+  document.getElementById('route-summary').style.display  = 'none';
+  document.getElementById('nav-btn').style.display        = 'none';
+  document.getElementById('chaff-status').style.display   = 'none';
+  document.getElementById('calc-route-btn').style.display = 'none';
+  document.getElementById('refresh-bar-wrap').style.display = 'none';
+  stopRefreshTimer();
+}
+
+// Clear destination pin and associated state
+function clearDestState() {
+  destLat = null; destLng = null;
+  if (destPin) { map.removeLayer(destPin); destPin = null; }
+  var di = document.getElementById('dest-input');
+  if (di) di.value = '';
+  var dr = document.getElementById('dest-results');
+  if (dr) { dr.style.display = 'none'; dr.innerHTML = ''; }
+  clearRoute();
 }
 
 // ── BOOT ─────────────────────────────────────────────────
