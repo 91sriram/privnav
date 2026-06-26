@@ -1687,6 +1687,7 @@ function locateAndFetch() {
       placeGpsMarker(userLat, userLng);
       map.setView([userLat, userLng], 14);
       fetchTrafficOnly();
+      preloadTilesForArea(userLat, userLng);
     },
     err => {
       showLoader(false);
@@ -2817,8 +2818,24 @@ function recentreMap() {
   map.setView([userLat, userLng], NAV_ZOOM, { animate: true, duration: 0.5 });
 }
 
+// When rotation is active, offset the map centre so GPS dot
+// appears in the lower third of screen (like Google Maps driving view)
+function getRotatedCentreOffset() {
+  if (!rotationEnabled || currentHeading === 0) return null;
+  // Shift the view centre slightly towards top of screen
+  // so more road ahead is visible
+  var offsetMetres = 150; // metres ahead to show
+  var rad = currentHeading * Math.PI / 180;
+  var dLat = (offsetMetres / 111320) * Math.cos(rad);
+  var dLng = (offsetMetres / (111320 * Math.cos(userLat * Math.PI / 180))) * Math.sin(rad);
+  return [userLat + dLat, userLng + dLng];
+}
+
 function followGPS(lat, lng) {
   if (!mapFollowing || !navActive) return;
+  // When map is CSS-rotated, we still pan to the correct lat/lng
+  // Leaflet handles the coordinate transform internally
+  // The visual offset is a CSS transform on #map only, not the projection
   map.panTo([lat, lng], { animate: true, duration: 0.3, easeLinearity: 0.5 });
 }
 
@@ -3043,14 +3060,27 @@ async function directNominatimSearch(query, target, resultsEl) {
           originLat = lat; originLng = lng;
           addPinMarker(lat, lng, 'origin');
         } else {
+          // Clear previous destination completely before setting new one
           destLat = null; destLng = null;
           if (destPin) { map.removeLayer(destPin); destPin = null; }
           if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
-          if (routeSegLayers) { routeSegLayers.forEach(function(l){ map.removeLayer(l); }); routeSegLayers = []; }
+          if (typeof routeSegLayers !== 'undefined' && routeSegLayers) {
+            routeSegLayers.forEach(function(l){ map.removeLayer(l); });
+            routeSegLayers = [];
+          }
+          if (navPolyline) { map.removeLayer(navPolyline); navPolyline = null; }
+          if (typeof navSegLayers !== 'undefined' && navSegLayers) {
+            navSegLayers.forEach(function(l){ map.removeLayer(l); });
+            navSegLayers = [];
+          }
           document.getElementById('route-summary').style.display = 'none';
           document.getElementById('nav-btn').style.display = 'none';
           document.getElementById('chaff-status').style.display = 'none';
+          document.getElementById('calc-route-btn').style.display = 'none';
           stopRefreshTimer();
+          currentRouteData = null;
+          allRouteCoords = [];
+          // Now set new destination
           destLat = lat; destLng = lng;
           addPinMarker(lat, lng, 'dest');
         }
@@ -3219,6 +3249,32 @@ function applyMapRotation(heading) {
       ? '↑ ' + Math.round(heading) + '° · tap N'
       : '↑ N';
   }
+}
+
+
+// ── TILE PRELOAD ──────────────────────────────────────────
+// Pre-fetch tiles for current area at key zoom levels
+// so subsequent loads are faster
+function preloadTilesForArea(lat, lng) {
+  var key = getKey();
+  if (!key) return;
+  // Preload OSM/CARTO base tiles via link preload hints
+  // Browser will cache these automatically
+  var zooms = [13, 14, 15, 16];
+  zooms.forEach(function(z) {
+    var n = Math.pow(2, z);
+    var xtile = Math.floor((lng + 180) / 360 * n);
+    var ytile = Math.floor((1 - Math.log(Math.tan(lat * Math.PI / 180) + 1 / Math.cos(lat * Math.PI / 180)) / Math.PI) / 2 * n);
+    // Preload 3x3 grid around current position
+    for (var dx = -1; dx <= 1; dx++) {
+      for (var dy = -1; dy <= 1; dy++) {
+        var url = 'https://a.basemaps.cartocdn.com/dark_all/' + z + '/' + (xtile+dx) + '/' + (ytile+dy) + '.png';
+        var img = new Image();
+        img.src = url; // triggers browser cache
+      }
+    }
+  });
+  console.log('Preloading tiles for zoom levels', zooms, 'around', lat.toFixed(4), lng.toFixed(4));
 }
 
 // ── BOOT ─────────────────────────────────────────────────
