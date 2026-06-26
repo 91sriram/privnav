@@ -2903,6 +2903,18 @@ function onDirectInput(val, target) {
   var resultsId = target + '-results';
   var resultsEl = document.getElementById(resultsId);
 
+  // If user is retyping destination, clear the old one immediately
+  if (target === 'dest' && destLat !== null) {
+    destLat = null; destLng = null;
+    if (destPin) { map.removeLayer(destPin); destPin = null; }
+    if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
+    document.getElementById('route-summary').style.display = 'none';
+    document.getElementById('nav-btn').style.display = 'none';
+    document.getElementById('calc-route-btn').style.display = 'none';
+    document.getElementById('chaff-status').style.display = 'none';
+    stopRefreshTimer();
+  }
+
   if (val.trim().length < 3) {
     resultsEl.style.display = 'none';
     resultsEl.innerHTML = '';
@@ -2948,11 +2960,22 @@ async function directNominatimSearch(query, target, resultsEl) {
         var inp = document.getElementById(target + '-input');
         inp.value = name;
         resultsEl.style.display = 'none';
+        resultsEl.innerHTML = '';
 
         if (target === 'origin') {
           originLat = lat; originLng = lng;
           addPinMarker(lat, lng, 'origin');
         } else {
+          // Clear previous destination completely before setting new one
+          destLat = null; destLng = null;
+          if (destPin) { map.removeLayer(destPin); destPin = null; }
+          if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
+          if (routeSegLayers) { routeSegLayers.forEach(function(l){ map.removeLayer(l); }); routeSegLayers = []; }
+          document.getElementById('route-summary').style.display = 'none';
+          document.getElementById('nav-btn').style.display = 'none';
+          document.getElementById('chaff-status').style.display = 'none';
+          stopRefreshTimer();
+          // Now set new destination
           destLat = lat; destLng = lng;
           addPinMarker(lat, lng, 'dest');
         }
