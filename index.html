@@ -1043,8 +1043,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
     top: 10px;
     left: 10px;
     right: 10px;
-    width: auto;
-    max-width: 480px;
+    max-width: 420px;
     z-index: 950;
     flex-direction: column;
     gap: 6px;
@@ -1063,7 +1062,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
   }
   #nav-arrow { font-size: 48px; flex-shrink: 0; line-height: 1; color: #fff; }
   #nav-text { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
-  #nav-instruction { font-size: 19px; font-weight: 800; color: #fff; line-height: 1.25; }
+  #nav-instruction { font-size: 16px; font-weight: 800; color: #fff; line-height: 1.3; white-space: normal; word-break: break-word; }
   #nav-distance { font-family: var(--font-mono); font-size: 16px; font-weight: 700; color: rgba(255,255,255,0.9); }
   #nav-next { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 8px; pointer-events: auto; }
   #nav-next-arrow { font-size: 16px; flex-shrink: 0; }
@@ -1306,14 +1305,10 @@ svg.leaflet-image-layer.leaflet-interactive path {
     transform-origin: center center;
     transition: transform 0.3s ease-out;
   }
-  /* Counter-rotate elements that should stay upright */
-  #map-wrap.rotating #nav-hud,
-  #map-wrap.rotating #offroute-banner,
-  #map-wrap.rotating #recentre-btn,
-  #map-wrap.rotating #loader,
-  #map-wrap.rotating #map-hint,
-  #map-wrap.rotating #panel-toggle {
-    transition: transform 0.3s ease-out;
+  /* Map tile layer transition */
+  #map {
+    transition: transform 0.25s ease-out;
+    transform-origin: center center;
   }
   /* North indicator pill */
   #north-pill {
@@ -3212,28 +3207,17 @@ function smoothAndApplyHeading(heading) {
 function applyMapRotation(heading) {
   currentHeading = heading;
   var mapEl = document.getElementById('map');
-  // Rotate map — scale up 1.5x to cover corners during rotation
+  // Rotate ONLY the map tile layer, not the whole container
+  // HUD elements are siblings of #map inside #map-wrap so they stay fixed
   mapEl.style.transform = 'rotate(' + (-heading) + 'deg) scale(1.5)';
+  mapEl.style.transformOrigin = 'center center';
 
-  // Counter-rotate UI elements to stay upright
-  var counterRot = 'rotate(' + heading + 'deg)';
-  var hud = document.getElementById('nav-hud');
-  var banner = document.getElementById('offroute-banner');
-  var recentre = document.getElementById('recentre-btn');
-  var hint = document.getElementById('map-hint');
-  if (hud) hud.style.transform = counterRot;
-  if (banner) banner.style.transform = counterRot;
-  if (recentre) recentre.style.transform = counterRot;
-  if (hint) hint.style.transform = counterRot;
-
-  // Update north pill to show current bearing
+  // Update north pill
   var pill = document.getElementById('north-pill');
-  if (pill && heading > 2) {
-    pill.textContent = '⬆ ' + Math.round(heading) + '° · tap to reset';
-    pill.style.transform = counterRot;
-  } else if (pill) {
-    pill.textContent = '⬆ N';
-    pill.style.transform = counterRot;
+  if (pill) {
+    pill.textContent = heading > 2
+      ? '↑ ' + Math.round(heading) + '° · tap N'
+      : '↑ N';
   }
 }
 
