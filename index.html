@@ -795,8 +795,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
 
   /* ── SIDE PANEL ─────────────────────────────────────── */
   #panel {
-    position: absolute;
-    top: 10px;
+    position: fixed;
+    top: 54px;
     right: 10px;
     width: var(--panel-w);
     background: var(--surface);
@@ -1042,7 +1042,9 @@ svg.leaflet-image-layer.leaflet-interactive path {
     position: absolute;
     top: 10px;
     left: 10px;
-    width: 280px;
+    right: 10px;
+    width: auto;
+    max-width: 480px;
     z-index: 950;
     flex-direction: column;
     gap: 6px;
@@ -1052,17 +1054,17 @@ svg.leaflet-image-layer.leaflet-interactive path {
   #nav-current {
     background: var(--accent);
     border-radius: var(--radius);
-    padding: 12px 14px;
+    padding: 16px 18px;
     display: flex;
     align-items: center;
     gap: 12px;
     box-shadow: 0 4px 16px rgba(0,0,0,0.5);
     pointer-events: auto;
   }
-  #nav-arrow { font-size: 36px; flex-shrink: 0; line-height: 1; color: #fff; }
+  #nav-arrow { font-size: 48px; flex-shrink: 0; line-height: 1; color: #fff; }
   #nav-text { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
-  #nav-instruction { font-size: 14px; font-weight: 700; color: #fff; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  #nav-distance { font-family: var(--font-mono); font-size: 12px; color: rgba(255,255,255,0.8); }
+  #nav-instruction { font-size: 19px; font-weight: 800; color: #fff; line-height: 1.25; }
+  #nav-distance { font-family: var(--font-mono); font-size: 16px; font-weight: 700; color: rgba(255,255,255,0.9); }
   #nav-next { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 8px; pointer-events: auto; }
   #nav-next-arrow { font-size: 16px; flex-shrink: 0; }
   #nav-next-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -1078,6 +1080,221 @@ svg.leaflet-image-layer.leaflet-interactive path {
   .btn-nav { background: #2ecc71; color: #fff; }
   .btn-nav.stopping { background: var(--jam); }
 
+
+
+  /* ── SEARCH INPUT ───────────────────────────────────── */
+  .search-wrap {
+    position: relative;
+  }
+
+  .search-results {
+    position: absolute;
+    top: 100%;
+    left: 0; right: 0;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-top: none;
+    border-radius: 0 0 var(--radius) var(--radius);
+    z-index: 1100;
+    max-height: 200px;
+    overflow-y: auto;
+    display: none;
+  }
+
+  .search-results.open { display: block; }
+
+  .search-result-item {
+    padding: 8px 10px;
+    font-size: 11px;
+    color: var(--text);
+    cursor: pointer;
+    border-bottom: 1px solid var(--border);
+    line-height: 1.4;
+  }
+
+  .search-result-item:last-child { border-bottom: none; }
+  .search-result-item:hover { background: var(--border); }
+
+  .search-result-item .res-name {
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .search-result-item .res-addr {
+    color: var(--muted);
+    font-size: 10px;
+    margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  input[type="text"].search-input {
+    padding-right: 32px;
+  }
+
+  .search-spinner {
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 14px; height: 14px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    display: none;
+  }
+
+  .search-spinner.show { display: block; }
+
+
+
+  /* ── PANEL TOUCH FIX ────────────────────────────────── */
+  #panel {
+    touch-action: auto !important;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+  #panel * {
+    touch-action: auto !important;
+  }
+  #panel input {
+    -webkit-user-select: text;
+    user-select: text;
+    touch-action: manipulation !important;
+    cursor: text;
+    pointer-events: auto !important;
+  }
+  .search-wrap {
+    touch-action: manipulation !important;
+    pointer-events: auto !important;
+  }
+
+
+  /* ── SEARCH MODAL ───────────────────────────────────── */
+  #search-modal-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 2000;
+    align-items: flex-end;
+    justify-content: center;
+  }
+  #search-modal-backdrop.open {
+    display: flex;
+  }
+  #search-modal {
+    background: var(--surface);
+    border-radius: 16px 16px 0 0;
+    width: 100%;
+    max-width: 600px;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-height: 80vh;
+  }
+  #search-modal-title {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+    text-align: center;
+  }
+  #search-modal-input {
+    width: 100%;
+    background: var(--bg);
+    border: 2px solid var(--accent);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-family: var(--font-ui);
+    font-size: 16px;
+    padding: 12px 14px;
+    outline: none;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+  #search-modal-results {
+    overflow-y: auto;
+    max-height: 50vh;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .modal-result-item {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+    cursor: pointer;
+  }
+  .modal-result-item:active { background: var(--border); }
+  .modal-result-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .modal-result-addr {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #search-modal-cancel {
+    background: var(--border);
+    border: none;
+    border-radius: var(--radius);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 10px;
+    cursor: pointer;
+    width: 100%;
+  }
+  /* Replace text inputs with tappable buttons in panel */
+  .route-tap-btn {
+    flex: 1;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 7px 10px;
+    text-align: left;
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .route-tap-btn.set {
+    color: var(--text);
+    border-color: var(--accent);
+  }
+
+
+  #nav-exit-btn {
+    background: var(--jam);
+    border: none;
+    border-radius: var(--radius);
+    color: #fff;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 700;
+    padding: 12px;
+    cursor: pointer;
+    pointer-events: auto;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+    width: 100%;
+  }
+  #nav-exit-btn:active { opacity: 0.8; }
+
+  #origin-input, #dest-input { flex: 1; font-size: 14px; }
 
   /* LEAFLET OVERRIDES */
   .leaflet-control-zoom {
@@ -1206,6 +1423,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
           <div class="np-label">Step</div>
         </div>
       </div>
+      <button id="nav-exit-btn" onclick="stopNavigation()">✕ Exit Navigation</button>
     </div>
 
     <!-- OFF ROUTE BANNER -->
@@ -1215,6 +1433,9 @@ svg.leaflet-image-layer.leaflet-interactive path {
     <div id="loader"><div class="spinner"></div></div>
     <div id="map-hint"></div>
     <button id="panel-toggle" onclick="togglePanel()">⚙ Controls</button>
+
+
+  </div>
 
     <div id="panel">
       <div id="panel-header">
@@ -1279,14 +1500,16 @@ svg.leaflet-image-layer.leaflet-interactive path {
           <div class="route-input-wrap">
             <div class="route-input-row">
               <div class="route-dot origin"></div>
-              <input type="text" id="origin-input" placeholder="Origin (tap map or type lat,lng)" readonly/>
+              <input type="text" id="origin-input" placeholder="Type origin or tap map" autocomplete="off" oninput="onDirectInput(this.value,'origin')"/>
               <button class="btn-icon" title="Use current GPS position" onclick="useGpsAsOrigin()">◎</button>
             </div>
+            <div id="origin-results" style="display:none;position:relative;z-index:1100;background:#151820;border:1px solid #232733;border-radius:0 0 6px 6px;max-height:180px;overflow-y:auto;"></div>
             <div class="route-input-row">
               <div class="route-dot dest"></div>
-              <input type="text" id="dest-input" placeholder="Destination (tap map)" readonly/>
+              <input type="text" id="dest-input" placeholder="Type destination or tap map" autocomplete="off" oninput="onDirectInput(this.value,'dest')"/>
               <button class="btn-icon" title="Clear destination" onclick="clearDest()">✕</button>
             </div>
+            <div id="dest-results" style="display:none;position:relative;z-index:1100;background:#151820;border:1px solid #232733;border-radius:0 0 6px 6px;max-height:180px;overflow-y:auto;"></div>
           </div>
 
           <div style="margin-top:6px;font-size:10px;color:var(--muted)">
@@ -1371,7 +1594,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
 
       </div>
     </div>
-  </div>
+
 </div>
 
 <script>
@@ -1390,6 +1613,7 @@ function initMap() {
     zoom: 13,
     zoomControl: true,
     attributionControl: true,
+    tap: false,  // CRITICAL: Leaflet's tap handler breaks input focus on mobile
   });
 
   // OSM base tiles — dark Carto variant
@@ -1435,7 +1659,7 @@ function locateAndFetch() {
       setPill('pill-gps', 'err', 'GPS ERROR');
       alert('Could not get location: ' + err.message);
     },
-    { enableHighAccuracy: true, timeout: 10000 }
+    { enableHighAccuracy: true, timeout: 30000, maximumAge: 5000 }
   );
 }
 
@@ -1688,6 +1912,7 @@ function togglePanel() {
 let originLat = null, originLng = null;
 let destLat   = null, destLng   = null;
 let routeLayer = null;
+let routeSegLayers = [];
 let mapClickMode = null; // 'origin' | 'dest' | null
 let refreshTimer = null;
 let refreshInterval = null;
@@ -1703,17 +1928,35 @@ const CHENNAI_BOUNDS = {
 
 // ── MAP CLICK HANDLER ────────────────────────────────────
 function initMapClickHandler() {
+  // Use Leaflet's native method to stop map events on panel
+  var panelEl = document.getElementById('panel');
+  L.DomEvent.disableClickPropagation(panelEl);
+  L.DomEvent.disableScrollPropagation(panelEl);
+
+  // Also explicitly stop touch events on inputs from reaching Leaflet
+  document.querySelectorAll('#panel input').forEach(function(inp) {
+    L.DomEvent.disableClickPropagation(inp);
+    inp.addEventListener('touchstart', function(e) { e.stopPropagation(); }, { passive: true });
+    inp.addEventListener('touchend',   function(e) { e.stopPropagation(); });
+    inp.addEventListener('click',      function(e) { e.stopPropagation(); });
+  });
+
   map.on('click', function(e) {
-    if (!mapClickMode) return;
+    // If no mode set, enter origin pick if no origin yet, else dest
+    if (!mapClickMode) {
+      if (originLat === null) mapClickMode = 'origin';
+      else if (destLat === null) mapClickMode = 'dest';
+      else return;
+    }
     const { lat, lng } = e.latlng;
 
     if (mapClickMode === 'origin') {
       originLat = lat; originLng = lng;
-      document.getElementById('origin-input').value = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+      document.getElementById('origin-input').value = lat.toFixed(5) + ', ' + lng.toFixed(5);
       addPinMarker(lat, lng, 'origin');
     } else if (mapClickMode === 'dest') {
       destLat = lat; destLng = lng;
-      document.getElementById('dest-input').value = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+      document.getElementById('dest-input').value = lat.toFixed(5) + ', ' + lng.toFixed(5);
       addPinMarker(lat, lng, 'dest');
     }
 
@@ -1724,9 +1967,11 @@ function initMapClickHandler() {
     checkRouteReady();
   });
 
-  // Start in origin-pick mode immediately
-  mapClickMode = 'origin';
-  showMapHint('Tap map to set origin');
+  // Don't auto-enter click mode — user can type or tap map
+  mapClickMode = null;
+  // Show subtle hint
+  showMapHint('Tap map to set origin or type above');
+  setTimeout(hideMapHint, 3000);
 }
 
 let originPin = null, destPin = null;
@@ -1760,7 +2005,7 @@ function addPinMarker(lat, lng, type) {
 function useGpsAsOrigin() {
   if (!userLat) { alert('Get your GPS position first.'); return; }
   originLat = userLat; originLng = userLng;
-  document.getElementById('origin-input').value = `${userLat.toFixed(5)}, ${userLng.toFixed(5)}`;
+  document.getElementById('origin-input').value = userLat.toFixed(5) + ', ' + userLng.toFixed(5);
   addPinMarker(userLat, userLng, 'origin');
   mapClickMode = 'dest';
   showMapHint('Now tap map to set destination');
@@ -1770,6 +2015,7 @@ function useGpsAsOrigin() {
 function clearDest() {
   destLat = null; destLng = null;
   document.getElementById('dest-input').value = '';
+  document.getElementById('dest-results').style.display = 'none';
   if (destPin) { map.removeLayer(destPin); destPin = null; }
   if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
   document.getElementById('route-summary').style.display = 'none';
@@ -1872,6 +2118,7 @@ async function fetchRealRoute(key) {
     `&computeTravelTimeFor=all` +
     `&instructionsType=text` +
     `&language=en-GB` +
+    `&sectionType=traffic` +
     `&routeRepresentation=polyline`;
 
   const r = await fetch(url);
@@ -1882,6 +2129,12 @@ async function fetchRealRoute(key) {
 function renderRoute(data) {
   currentRouteData = data; // store for navigation
   document.getElementById('nav-btn').style.display = 'flex';
+
+  // Store totals for stable ETA (#4)
+  const sm = data.routes[0].summary;
+  routeTotalTimeSecs = sm.travelTimeInSeconds || 0;
+  routeTotalDistance = sm.lengthInMeters || 0;
+  parseTrafficSegments(data); // (#5) traffic colouring
   // Clear previous route
   if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
 
@@ -1899,17 +2152,29 @@ function renderRoute(data) {
     }
   }
 
-  // Draw route line
-  routeLayer = L.polyline(points, {
-    color: '#4f8ef7',
-    weight: 5,
-    opacity: 0.85,
-    lineJoin: 'round',
-    lineCap: 'round',
-  }).addTo(map);
+  // Draw route line — coloured by traffic if available (#5)
+  if (routeLayer) { map.removeLayer(routeLayer); }
+  if (routeSegLayers) { routeSegLayers.forEach(function(l){ map.removeLayer(l); }); }
+  routeSegLayers = [];
+
+  if (trafficSegments && trafficSegments.length > 0) {
+    for (let i = 1; i < points.length; i++) {
+      const colour = trafficColourForIndex(i);
+      const seg = L.polyline([points[i-1], points[i]], {
+        color: colour, weight: 5, opacity: 0.85, lineCap: 'round',
+      }).addTo(map);
+      routeSegLayers.push(seg);
+    }
+    routeLayer = routeSegLayers[0]; // reference for bounds
+  } else {
+    routeLayer = L.polyline(points, {
+      color: '#4f8ef7', weight: 5, opacity: 0.85, lineJoin: 'round', lineCap: 'round',
+    }).addTo(map);
+  }
 
   // Fit map to route
-  map.fitBounds(routeLayer.getBounds(), { padding: [40, 40] });
+  const allBounds = L.latLngBounds(points);
+  map.fitBounds(allBounds, { padding: [40, 40] });
 
   // Update summary panel
   const travelMins  = Math.round(summary.travelTimeInSeconds / 60);
@@ -1997,6 +2262,9 @@ let navPolyline     = null; // remaining route line
 let allRouteCoords  = [];   // full route coords
 let wakeLock        = null;
 let offRouteCount   = 0;
+let routeTotalTimeSecs = 0;
+let routeTotalDistance = 0;
+let trafficSegments    = []; // for coloured route (#5)
 const OFF_ROUTE_THRESHOLD = 60;  // metres
 const OFF_ROUTE_STRIKES   = 3;   // consecutive misses before alert
 
@@ -2146,11 +2414,7 @@ async function startNavigation() {
   document.getElementById('nav-hud').classList.add('active');
 
   // Request wake lock so screen stays on
-  try {
-    if ('wakeLock' in navigator) {
-      wakeLock = await navigator.wakeLock.request('screen');
-    }
-  } catch(_) { /* wake lock not critical */ }
+  await acquireWakeLock();
 
   // Speak first instruction
   updateHUD(0, 0);
@@ -2160,7 +2424,7 @@ async function startNavigation() {
   navWatchId = navigator.geolocation.watchPosition(
     onNavPosition,
     err => console.warn('Nav GPS error:', err.message),
-    { enableHighAccuracy: true, maximumAge: 2000, timeout: 5000 }
+    { enableHighAccuracy: true, maximumAge: 3000, timeout: 30000 }
   );
 }
 
@@ -2201,12 +2465,12 @@ function onNavPosition(pos) {
   placeGpsMarker(lat, lng);
   followGPS(lat, lng);
 
-  if (!navSteps.length) return;
+  if (!navSteps.length || !allRouteCoords.length) return;
 
-  // Find closest point on route
+  // Find closest point on route — this drives EVERYTHING
   const { closestIdx, distToRoute } = findClosestRoutePoint(lat, lng);
 
-  // Off route detection
+  // ── OFF ROUTE DETECTION (#2) ──
   if (distToRoute > OFF_ROUTE_THRESHOLD) {
     offRouteCount++;
     if (offRouteCount >= OFF_ROUTE_STRIKES) {
@@ -2217,26 +2481,82 @@ function onNavPosition(pos) {
     document.getElementById('offroute-banner').style.display = 'none';
   }
 
-  // Advance step based on distance to next maneuver point
-  advanceStep(lat, lng);
-
-  // Remaining distance estimate
+  // ── REMAINING DISTANCE (#3) ──
+  // Distance from current position to end of route along the polyline
   const remainCoords = allRouteCoords.slice(closestIdx);
-  const remainDist   = polylineLength(remainCoords);
+  const remainDist   = polylineLength(remainCoords) +
+    haversine(lat, lng, allRouteCoords[closestIdx][0], allRouteCoords[closestIdx][1]);
 
-  // ETA from current speed or route summary
-  const speed = pos.coords.speed || 10; // m/s, default 36 km/h if unknown
-  const etaSecs = remainDist / (speed > 0.5 ? speed : 10);
+  // ── STEP SYNC BY POSITION (#2) ──
+  // Determine which step we're on based on our progress distance along route,
+  // NOT by distance to maneuver. This keeps steps correct even on detours.
+  const distFromStart = polylineLength(allRouteCoords.slice(0, closestIdx + 1));
+  syncStepToProgress(distFromStart);
+
+  // Distance to the NEXT maneuver point
+  let distToManeuver = 0;
+  const nextStep = navSteps[navCurrentStep];
+  if (nextStep && nextStep.distToNext > distFromStart) {
+    distToManeuver = nextStep.distToNext - distFromStart;
+  }
+  updateHUD(navCurrentStep, distToManeuver);
+  maybeAnnounce(distToManeuver);
+
+  // ── STABLE ETA FROM TOMTOM (#4) ──
+  // Use TomTom's traffic-aware travel time, scaled by fraction remaining.
+  // This is stable because it's based on the route's own estimate, not GPS speed.
+  const totalDist = routeTotalDistance || polylineLength(allRouteCoords);
+  const fracRemaining = totalDist > 0 ? (remainDist / totalDist) : 0;
+  const etaSecs = routeTotalTimeSecs * fracRemaining;
   const etaTime = new Date(Date.now() + etaSecs * 1000);
   const etaStr  = etaTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-  document.getElementById('np-eta').textContent        = etaStr;
+  document.getElementById('np-eta').textContent         = etaStr;
   document.getElementById('np-remain-dist').textContent = formatDist(remainDist);
   document.getElementById('np-step').textContent        =
     (navCurrentStep + 1) + '/' + navSteps.length;
 
-  // Draw remaining route
+  // Draw remaining route in traffic colours
   drawRemainingRoute(closestIdx);
+}
+
+// ── SYNC STEP TO PROGRESS DISTANCE (#2) ──
+// Steps have a distToNext = absolute offset from route start (metres).
+// We pick the step whose maneuver point is just ahead of our progress.
+function syncStepToProgress(distFromStart) {
+  let newStep = 0;
+  for (let i = 0; i < navSteps.length; i++) {
+    if (navSteps[i].distToNext <= distFromStart + 10) {
+      newStep = i + 1;
+    } else {
+      break;
+    }
+  }
+  newStep = Math.min(newStep, navSteps.length - 1);
+
+  if (newStep !== navCurrentStep) {
+    navCurrentStep = newStep;
+    // Announce the new step's instruction
+    const s = navSteps[navCurrentStep];
+    if (s) speak(s.instruction);
+    if (navCurrentStep >= navSteps.length - 1) {
+      speak('You have arrived at your destination');
+      setTimeout(stopNavigation, 4000);
+    }
+  }
+}
+
+// ── ANNOUNCE UPCOMING TURN (#2 distance based) ──
+let lastAnnounceStep = -1;
+function maybeAnnounce(distToManeuver) {
+  const step = navSteps[navCurrentStep];
+  if (!step) return;
+  // 200m pre-warning, announced once per step
+  if (distToManeuver > 50 && distToManeuver < 200 && lastAnnounceStep !== navCurrentStep) {
+    lastAnnounceStep = navCurrentStep;
+    const next = navSteps[navCurrentStep + 1];
+    if (next) speak('In 200 metres, ' + next.instruction);
+  }
 }
 
 function advanceStep(lat, lng) {
@@ -2341,15 +2661,75 @@ function haversine(lat1, lng1, lat2, lng2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
+let navSegLayers = [];
 function drawRemainingRoute(fromIdx) {
+  // Clear old segment layers
+  navSegLayers.forEach(function(l) { map.removeLayer(l); });
+  navSegLayers = [];
   if (navPolyline) { map.removeLayer(navPolyline); navPolyline = null; }
+
   const remaining = allRouteCoords.slice(fromIdx);
   if (remaining.length < 2) return;
-  navPolyline = L.polyline(remaining, {
-    color: '#4f8ef7',
-    weight: 6,
-    opacity: 0.9,
-  }).addTo(map);
+
+  // If we have traffic segments, colour the route by them (#5)
+  if (trafficSegments && trafficSegments.length > 0) {
+    drawColouredRoute(remaining, fromIdx);
+  } else {
+    // Fallback: single blue line
+    navPolyline = L.polyline(remaining, {
+      color: '#4f8ef7', weight: 6, opacity: 0.9,
+    }).addTo(map);
+  }
+}
+
+// Colour route segments by traffic delay severity (#5)
+function drawColouredRoute(coords, fromIdx) {
+  // trafficSegments: [{startIdx, endIdx, delayRatio}]
+  // Build a colour for each point index based on which segment it falls in
+  for (let i = 1; i < coords.length; i++) {
+    const globalIdx = fromIdx + i;
+    const colour = trafficColourForIndex(globalIdx);
+    const seg = L.polyline([coords[i-1], coords[i]], {
+      color: colour, weight: 6, opacity: 0.9, lineCap: 'round',
+    }).addTo(map);
+    navSegLayers.push(seg);
+  }
+}
+
+function trafficColourForIndex(idx) {
+  for (const seg of trafficSegments) {
+    if (idx >= seg.startIdx && idx <= seg.endIdx) {
+      if (seg.delayRatio >= 0.5) return '#e74c3c'; // heavy — red
+      if (seg.delayRatio >= 0.2) return '#f39c12'; // moderate — amber
+      return '#2ecc71'; // free flow — green
+    }
+  }
+  return '#4f8ef7'; // no data — blue
+}
+
+// Parse TomTom traffic sections into segment ranges (#5)
+function parseTrafficSegments(data) {
+  trafficSegments = [];
+  const route = data.routes[0];
+  if (!route.sections) return;
+
+  // Build cumulative point count per leg to map section offsets to coord indices
+  for (const section of route.sections) {
+    if (section.sectionType !== 'TRAFFIC') continue;
+    const startIdx = section.startPointIndex || 0;
+    const endIdx   = section.endPointIndex   || 0;
+    // delayRatio from magnitudeOfDelay or simpleCategory
+    let delayRatio = 0;
+    if (section.delayInSeconds && section.effectiveSpeedInKmh) {
+      // Estimate ratio from delay
+      delayRatio = Math.min(1, section.delayInSeconds / 120); // 2min+ = max
+    } else if (section.simpleCategory === 'JAM') {
+      delayRatio = 0.7;
+    } else if (section.magnitudeOfDelay) {
+      delayRatio = Math.min(1, section.magnitudeOfDelay / 4);
+    }
+    trafficSegments.push({ startIdx, endIdx, delayRatio });
+  }
 }
 
 // ── SPEECH ────────────────────────────────────────────────
@@ -2393,6 +2773,429 @@ function followGPS(lat, lng) {
   map.panTo([lat, lng], { animate: true, duration: 0.3, easeLinearity: 0.5 });
 }
 
+
+// ── NOMINATIM GEOCODING (OSM) ─────────────────────────────
+// Queries OSM Nominatim — no TomTom, no commercial profiling
+// Chennai bounding box to bias results locally
+const CHENNAI_VIEWBOX = '79.7,12.4,80.6,13.4';
+let searchDebounceTimer = null;
+
+async function nominatimSearch(query, spinnerId, resultsId, onSelect) {
+  if (query.length < 3) {
+    document.getElementById(resultsId).classList.remove('open');
+    return;
+  }
+
+  clearTimeout(searchDebounceTimer);
+  searchDebounceTimer = setTimeout(async () => {
+    const spinner = document.getElementById(spinnerId);
+    const resultsEl = document.getElementById(resultsId);
+    spinner.classList.add('show');
+
+    try {
+      // Nominatim with Chennai viewbox bias
+      const url = 'https://nominatim.openstreetmap.org/search' +
+        '?q=' + encodeURIComponent(query) +
+        '&format=json' +
+        '&limit=5' +
+        '&viewbox=' + CHENNAI_VIEWBOX +
+        '&bounded=0' +
+        '&addressdetails=1' +
+        '&accept-language=en';
+
+      const r = await fetch(url, {
+        headers: { 'User-Agent': 'PrivNav/1.0 (private navigation app)' }
+      });
+      if (!r.ok) throw new Error('Nominatim ' + r.status);
+      const results = await r.json();
+
+      resultsEl.innerHTML = '';
+      if (results.length === 0) {
+        resultsEl.innerHTML = '<div class="search-result-item"><div class="res-name">No results found</div></div>';
+        resultsEl.classList.add('open');
+        return;
+      }
+
+      results.forEach(function(place) {
+        const name = place.namedetails
+          ? (place.namedetails.name || place.display_name.split(',')[0])
+          : place.display_name.split(',')[0];
+        const addr = place.display_name;
+        const lat  = parseFloat(place.lat);
+        const lng  = parseFloat(place.lon);
+
+        const item = document.createElement('div');
+        item.className = 'search-result-item';
+        item.innerHTML =
+          '<div class="res-name">' + name + '</div>' +
+          '<div class="res-addr">' + addr + '</div>';
+
+        item.addEventListener('click', function() {
+          onSelect(lat, lng, name);
+          resultsEl.classList.remove('open');
+        });
+
+        resultsEl.appendChild(item);
+      });
+
+      resultsEl.classList.add('open');
+
+    } catch(e) {
+      console.warn('Nominatim error:', e);
+      document.getElementById(resultsId).classList.remove('open');
+    } finally {
+      spinner.classList.remove('show');
+    }
+  }, 400); // 400ms debounce — Nominatim asks for ≥1s between requests
+}
+
+function onDestInput(val) {
+  // Allow map tap to still work — only geocode if user typed something
+  nominatimSearch(val, 'dest-spinner', 'dest-results', function(lat, lng, name) {
+    destLat = lat; destLng = lng;
+    document.getElementById('dest-input').value = name;
+    addPinMarker(lat, lng, 'dest');
+    map.setView([lat, lng], 14, { animate: true });
+    checkRouteReady();
+    mapClickMode = null;
+    hideMapHint();
+  });
+}
+
+function onOriginInput(val) {
+  nominatimSearch(val, 'origin-spinner', 'origin-results', function(lat, lng, name) {
+    originLat = lat; originLng = lng;
+    document.getElementById('origin-input').value = name;
+    addPinMarker(lat, lng, 'origin');
+    map.setView([lat, lng], 14, { animate: true });
+    checkRouteReady();
+    // Switch to dest pick mode after origin set
+    mapClickMode = 'dest';
+    showMapHint('Now tap map or type your destination');
+  });
+}
+
+// Close results when clicking outside
+document.addEventListener('click', function(e) {
+  if (!e.target.closest('.search-wrap')) {
+    document.querySelectorAll('.search-results').forEach(function(el) {
+      el.classList.remove('open');
+    });
+  }
+});
+
+
+// ── SEARCH MODAL ──────────────────────────────────────────
+let searchModalTarget = null; // 'origin' or 'dest'
+let modalDebounce     = null;
+
+function openSearchModal(target) {
+  searchModalTarget = target;
+  const title = target === 'origin' ? 'Set Origin' : 'Set Destination';
+  document.getElementById('search-modal-title').textContent = title;
+  document.getElementById('search-modal-input').value = '';
+  document.getElementById('search-modal-results').innerHTML = '';
+  document.getElementById('search-modal-backdrop').classList.add('open');
+
+  // Focus input after short delay so modal animation completes
+  setTimeout(function() {
+    var inp = document.getElementById('search-modal-input');
+    inp.focus();
+    inp.click();
+  }, 100);
+}
+
+function closeSearchModal() {
+  document.getElementById('search-modal-backdrop').classList.remove('open');
+  document.getElementById('search-modal-input').blur();
+  searchModalTarget = null;
+}
+
+// Close on backdrop tap
+document.getElementById('search-modal-backdrop').addEventListener('click', function(e) {
+  if (e.target === this) closeSearchModal();
+});
+
+// Live search as user types
+document.getElementById('search-modal-input').addEventListener('input', function() {
+  const q = this.value.trim();
+  clearTimeout(modalDebounce);
+  if (q.length < 3) {
+    document.getElementById('search-modal-results').innerHTML = '';
+    return;
+  }
+  modalDebounce = setTimeout(function() { modalNominatimSearch(q); }, 400);
+});
+
+async function modalNominatimSearch(query) {
+  const resultsEl = document.getElementById('search-modal-results');
+  resultsEl.innerHTML = '<div style="color:var(--muted);font-size:11px;padding:8px;text-align:center">Searching…</div>';
+
+  try {
+    const url = 'https://nominatim.openstreetmap.org/search' +
+      '?q=' + encodeURIComponent(query) +
+      '&format=json&limit=6' +
+      '&viewbox=' + CHENNAI_VIEWBOX +
+      '&bounded=0&addressdetails=1&accept-language=en';
+
+    const r = await fetch(url, {
+      headers: { 'User-Agent': 'PrivNav/1.0 (private navigation app)' }
+    });
+    if (!r.ok) throw new Error('Nominatim ' + r.status);
+    const results = await r.json();
+
+    resultsEl.innerHTML = '';
+    if (results.length === 0) {
+      resultsEl.innerHTML = '<div style="color:var(--muted);font-size:11px;padding:8px;text-align:center">No results found</div>';
+      return;
+    }
+
+    results.forEach(function(place) {
+      const name    = place.display_name.split(',')[0];
+      const addr    = place.display_name;
+      const lat     = parseFloat(place.lat);
+      const lng     = parseFloat(place.lon);
+
+      const item = document.createElement('div');
+      item.className = 'modal-result-item';
+      item.innerHTML =
+        '<div class="modal-result-name">' + name + '</div>' +
+        '<div class="modal-result-addr">' + addr + '</div>';
+
+      item.addEventListener('click', function() {
+        selectModalResult(lat, lng, name);
+      });
+      resultsEl.appendChild(item);
+    });
+
+  } catch(e) {
+    resultsEl.innerHTML = '<div style="color:var(--jam);font-size:11px;padding:8px">Search failed — check connection</div>';
+  }
+}
+
+function selectModalResult(lat, lng, name) {
+  if (searchModalTarget === 'origin') {
+    originLat = lat; originLng = lng;
+    var btn = document.getElementById('origin-input');
+    btn.textContent = name;
+    btn.classList.add('set');
+    addPinMarker(lat, lng, 'origin');
+    map.setView([lat, lng], 14, { animate: true });
+  } else {
+    destLat = lat; destLng = lng;
+    var btn = document.getElementById('dest-input');
+    btn.textContent = name;
+    btn.classList.add('set');
+    addPinMarker(lat, lng, 'dest');
+    map.setView([lat, lng], 14, { animate: true });
+  }
+  closeSearchModal();
+  checkRouteReady();
+  mapClickMode = null;
+}
+
+
+// ── FULLSCREEN SEARCH OVERLAY ─────────────────────────────
+let testSearchTarget = null;
+let testSearchDebounce = null;
+
+function openTestSearch(target) {
+  testSearchTarget = target;
+  var overlay = document.getElementById('test-search-overlay');
+  overlay.style.display = 'flex';
+  var inp = document.getElementById('test-search-input');
+  inp.value = '';
+  document.getElementById('test-search-results').innerHTML = '';
+
+  // Multiple attempts to focus and trigger keyboard
+  inp.focus();
+  setTimeout(function() { inp.focus(); inp.click(); }, 50);
+  setTimeout(function() { inp.focus(); }, 150);
+  setTimeout(function() { inp.focus(); }, 300);
+}
+
+function closeTestSearch() {
+  document.getElementById('test-search-overlay').style.display = 'none';
+  document.getElementById('test-search-input').blur();
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  var inp = document.getElementById('test-search-input');
+  inp.addEventListener('input', function() {
+    var q = this.value.trim();
+    clearTimeout(testSearchDebounce);
+    if (q.length < 3) {
+      document.getElementById('test-search-results').innerHTML = '';
+      return;
+    }
+    testSearchDebounce = setTimeout(function() {
+      runTestSearch(q);
+    }, 500);
+  });
+});
+
+async function runTestSearch(query) {
+  var resultsEl = document.getElementById('test-search-results');
+  resultsEl.innerHTML = '<div style="color:#555e72;font-size:12px;padding:8px">Searching…</div>';
+
+  try {
+    var url = 'https://nominatim.openstreetmap.org/search' +
+      '?q=' + encodeURIComponent(query) +
+      '&format=json&limit=6&viewbox=79.7,12.4,80.6,13.4&bounded=0&addressdetails=1&accept-language=en';
+
+    var r = await fetch(url, {
+      headers: { 'User-Agent': 'PrivNav/1.0' }
+    });
+    var results = await r.json();
+    resultsEl.innerHTML = '';
+
+    if (results.length === 0) {
+      resultsEl.innerHTML = '<div style="color:#555e72;font-size:12px;padding:8px">No results</div>';
+      return;
+    }
+
+    results.forEach(function(place) {
+      var name = place.display_name.split(',')[0];
+      var lat  = parseFloat(place.lat);
+      var lng  = parseFloat(place.lon);
+
+      var item = document.createElement('div');
+      item.style.cssText = 'background:#151820;border:1px solid #232733;border-radius:8px;padding:12px;cursor:pointer;';
+      item.innerHTML = '<div style="font-size:14px;font-weight:600;color:#c8cdd8">' + name + '</div>' +
+        '<div style="font-size:11px;color:#555e72;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + place.display_name + '</div>';
+
+      item.addEventListener('click', function() {
+        if (testSearchTarget === 'dest') {
+          destLat = lat; destLng = lng;
+          var btn = document.getElementById('dest-input');
+          btn.textContent = name;
+          btn.classList.add('set');
+          addPinMarker(lat, lng, 'dest');
+          map.setView([lat, lng], 14, { animate: true });
+        } else {
+          originLat = lat; originLng = lng;
+          var btn = document.getElementById('origin-input');
+          btn.textContent = name;
+          btn.classList.add('set');
+          addPinMarker(lat, lng, 'origin');
+          map.setView([lat, lng], 14, { animate: true });
+        }
+        closeTestSearch();
+        checkRouteReady();
+      });
+      resultsEl.appendChild(item);
+    });
+  } catch(e) {
+    resultsEl.innerHTML = '<div style="color:#e74c3c;font-size:12px;padding:8px">Error: ' + e.message + '</div>';
+  }
+}
+
+
+// ── DIRECT INPUT HANDLER ──────────────────────────────────
+let directDebounce = null;
+
+function onDirectInput(val, target) {
+  clearTimeout(directDebounce);
+  var resultsId = target + '-results';
+  var resultsEl = document.getElementById(resultsId);
+
+  if (val.trim().length < 3) {
+    resultsEl.style.display = 'none';
+    resultsEl.innerHTML = '';
+    return;
+  }
+
+  directDebounce = setTimeout(function() {
+    directNominatimSearch(val.trim(), target, resultsEl);
+  }, 500);
+}
+
+async function directNominatimSearch(query, target, resultsEl) {
+  resultsEl.innerHTML = '<div style="color:#555e72;font-size:11px;padding:8px;text-align:center">Searching…</div>';
+  resultsEl.style.display = 'block';
+
+  try {
+    var url = 'https://nominatim.openstreetmap.org/search' +
+      '?q=' + encodeURIComponent(query) +
+      '&format=json&limit=5&viewbox=79.7,12.4,80.6,13.4&bounded=0&addressdetails=1&accept-language=en';
+
+    var r = await fetch(url, { headers: { 'User-Agent': 'PrivNav/1.0' } });
+    var results = await r.json();
+    resultsEl.innerHTML = '';
+
+    if (results.length === 0) {
+      resultsEl.innerHTML = '<div style="color:#555e72;font-size:11px;padding:8px;text-align:center">No results</div>';
+      return;
+    }
+
+    results.forEach(function(place) {
+      var name = place.display_name.split(',')[0];
+      var lat  = parseFloat(place.lat);
+      var lng  = parseFloat(place.lon);
+      var full = place.display_name;
+
+      var item = document.createElement('div');
+      item.style.cssText = 'padding:9px 10px;cursor:pointer;border-bottom:1px solid #232733;';
+      item.innerHTML =
+        '<div style="font-size:12px;font-weight:600;color:#c8cdd8">' + name + '</div>' +
+        '<div style="font-size:10px;color:#555e72;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + full + '</div>';
+
+      item.addEventListener('click', function() {
+        var inp = document.getElementById(target + '-input');
+        inp.value = name;
+        resultsEl.style.display = 'none';
+
+        if (target === 'origin') {
+          originLat = lat; originLng = lng;
+          addPinMarker(lat, lng, 'origin');
+        } else {
+          destLat = lat; destLng = lng;
+          addPinMarker(lat, lng, 'dest');
+        }
+        map.setView([lat, lng], 14, { animate: true });
+        checkRouteReady();
+      });
+
+      resultsEl.appendChild(item);
+    });
+
+  } catch(e) {
+    resultsEl.innerHTML = '<div style="color:#e74c3c;font-size:11px;padding:8px">Search failed</div>';
+  }
+}
+
+
+// ── WAKE LOCK MANAGEMENT (#6) ─────────────────────────────
+async function acquireWakeLock() {
+  try {
+    if ('wakeLock' in navigator) {
+      wakeLock = await navigator.wakeLock.request('screen');
+      // Re-acquire if the lock is released by the system
+      wakeLock.addEventListener('release', function() {
+        console.log('Wake lock released by system');
+      });
+    }
+  } catch(e) {
+    console.warn('Wake lock failed:', e.message);
+  }
+}
+
+// When page regains visibility (e.g. after a phone call), re-acquire (#6)
+document.addEventListener('visibilitychange', async function() {
+  if (document.visibilityState === 'visible' && navActive) {
+    // Re-acquire wake lock — it gets dropped when page is hidden
+    await acquireWakeLock();
+    // Also re-acquire GPS watch in case it was suspended
+    if (navWatchId === null) {
+      navWatchId = navigator.geolocation.watchPosition(
+        onNavPosition,
+        function(err) { console.warn('Nav GPS error:', err.message); },
+        { enableHighAccuracy: true, maximumAge: 3000, timeout: 30000 }
+      );
+    }
+  }
+});
+
 // ── BOOT ─────────────────────────────────────────────────
 initMap();
 </script>
@@ -2406,5 +3209,75 @@ if ('serviceWorker' in navigator) {
   });
 }
 </script>
+
+<!-- SEARCH MODAL — sits above everything, outside Leaflet entirely -->
+<div id="search-modal-backdrop">
+  <div id="search-modal">
+    <div id="search-modal-title">Set location</div>
+    <input type="search" id="search-modal-input"
+      placeholder="Type a place name or address…"
+      autocomplete="off" autocorrect="off" autocapitalize="off"
+      spellcheck="false" enterkeyhint="search"/>
+    <div id="search-modal-results"></div>
+    <button id="search-modal-cancel" onclick="closeSearchModal()">Cancel</button>
+  </div>
+</div>
+
+
+<!-- STANDALONE TEST INPUT — completely isolated -->
+<div id="test-search-overlay" style="
+  display:none;
+  position:fixed;
+  inset:0;
+  z-index:9999;
+  background:#0d0f14;
+  flex-direction:column;
+  align-items:stretch;
+  padding:20px;
+  gap:12px;
+">
+  <div style="color:#4f8ef7;font-family:monospace;font-size:13px;text-transform:uppercase;letter-spacing:0.1em">
+    Search Destination
+  </div>
+  <input
+    id="test-search-input"
+    type="text"
+    inputmode="search"
+    enterkeyhint="search"
+    placeholder="Type a place name…"
+    style="
+      font-size:18px;
+      padding:14px;
+      background:#151820;
+      border:2px solid #4f8ef7;
+      border-radius:8px;
+      color:#c8cdd8;
+      width:100%;
+      outline:none;
+      -webkit-appearance:none;
+    "
+    autocomplete="off"
+    autocorrect="off"
+    autocapitalize="off"
+    spellcheck="false"
+  />
+  <div id="test-search-results" style="
+    overflow-y:auto;
+    flex:1;
+    display:flex;
+    flex-direction:column;
+    gap:6px;
+  "></div>
+  <button onclick="closeTestSearch()" style="
+    background:#232733;
+    border:none;
+    border-radius:8px;
+    color:#c8cdd8;
+    font-size:14px;
+    padding:12px;
+    cursor:pointer;
+  ">Cancel</button>
+</div>
+
 </body>
 </html>
