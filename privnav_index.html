@@ -1294,6 +1294,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
   }
   #nav-exit-btn:active { opacity: 0.8; }
 
+  #origin-input, #dest-input { flex: 1; font-size: 14px; }
+
   /* LEAFLET OVERRIDES */
   .leaflet-control-zoom {
     border: 1px solid var(--border) !important;
@@ -1498,37 +1500,13 @@ svg.leaflet-image-layer.leaflet-interactive path {
           <div class="route-input-wrap">
             <div class="route-input-row">
               <div class="route-dot origin"></div>
-              <input
-                id="origin-input"
-                type="text"
-                inputmode="search"
-                enterkeyhint="search"
-                placeholder="Type origin or tap map"
-                autocomplete="off"
-                autocorrect="off"
-                autocapitalize="off"
-                spellcheck="false"
-                style="flex:1;font-size:14px;padding:8px 10px;background:#0d0f14;border:1px solid #232733;border-radius:6px;color:#c8cdd8;outline:none;min-width:0;"
-                oninput="onDirectInput(this.value,'origin')"
-              />
+              <input type="text" id="origin-input" placeholder="Type origin or tap map" autocomplete="off" oninput="onDirectInput(this.value,'origin')"/>
               <button class="btn-icon" title="Use current GPS position" onclick="useGpsAsOrigin()">◎</button>
             </div>
             <div id="origin-results" style="display:none;position:relative;z-index:1100;background:#151820;border:1px solid #232733;border-radius:0 0 6px 6px;max-height:180px;overflow-y:auto;"></div>
             <div class="route-input-row">
               <div class="route-dot dest"></div>
-              <input
-                id="dest-input"
-                type="text"
-                inputmode="search"
-                enterkeyhint="search"
-                placeholder="Type destination or tap map"
-                autocomplete="off"
-                autocorrect="off"
-                autocapitalize="off"
-                spellcheck="false"
-                style="flex:1;font-size:14px;padding:8px 10px;background:#0d0f14;border:1px solid #232733;border-radius:6px;color:#c8cdd8;outline:none;min-width:0;"
-                oninput="onDirectInput(this.value,'dest')"
-              />
+              <input type="text" id="dest-input" placeholder="Type destination or tap map" autocomplete="off" oninput="onDirectInput(this.value,'dest')"/>
               <button class="btn-icon" title="Clear destination" onclick="clearDest()">✕</button>
             </div>
             <div id="dest-results" style="display:none;position:relative;z-index:1100;background:#151820;border:1px solid #232733;border-radius:0 0 6px 6px;max-height:180px;overflow-y:auto;"></div>
