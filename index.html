@@ -1296,6 +1296,44 @@ svg.leaflet-image-layer.leaflet-interactive path {
 
   #origin-input, #dest-input { flex: 1; font-size: 14px; }
 
+
+  /* ── MAP ROTATION ───────────────────────────────────── */
+  #map-wrap.rotating {
+    overflow: visible; /* allow rotated map to extend beyond bounds */
+  }
+  #map.rotated {
+    /* Scale up slightly so rotation doesn't show edges */
+    transform-origin: center center;
+    transition: transform 0.3s ease-out;
+  }
+  /* Counter-rotate elements that should stay upright */
+  #map-wrap.rotating #nav-hud,
+  #map-wrap.rotating #offroute-banner,
+  #map-wrap.rotating #recentre-btn,
+  #map-wrap.rotating #loader,
+  #map-wrap.rotating #map-hint,
+  #map-wrap.rotating #panel-toggle {
+    transition: transform 0.3s ease-out;
+  }
+  /* North indicator pill */
+  #north-pill {
+    display: none;
+    position: absolute;
+    top: 10px;
+    right: 60px;
+    z-index: 950;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 4px 10px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--accent);
+    cursor: pointer;
+  }
+  #north-pill.active { display: block; }
+
+
   /* LEAFLET OVERRIDES */
   .leaflet-control-zoom {
     border: 1px solid var(--border) !important;
@@ -1430,6 +1468,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
     <div id="offroute-banner" onclick="calculateRoute()">⚠ Off route — tap to reroute</div>
 
     <button id="recentre-btn" onclick="recentreMap()" title="Re-centre on my position">◎</button>
+    <div id="north-pill" onclick="resetNorth()" title="Tap to reset north">⬆ N</div>
     <div id="loader"><div class="spinner"></div></div>
     <div id="map-hint"></div>
     <button id="panel-toggle" onclick="togglePanel()">⚙ Controls</button>
@@ -2410,6 +2449,9 @@ async function startNavigation() {
   // Detect manual pan — stop following
   map.on('dragstart', disableFollowing);
 
+  // Enable heading-up rotation
+  startHeadingUp();
+
   // Show HUD
   document.getElementById('nav-hud').classList.add('active');
 
@@ -2440,6 +2482,9 @@ function stopNavigation() {
 
   document.getElementById('nav-hud').classList.remove('active');
 
+  // Stop heading-up rotation
+  stopHeadingUp();
+
   // Restore panel
   document.getElementById('panel').style.display = 'flex';
   document.getElementById('panel-toggle').style.display = 'block';
@@ -2464,6 +2509,15 @@ function onNavPosition(pos) {
   userLat = lat; userLng = lng;
   placeGpsMarker(lat, lng);
   followGPS(lat, lng);
+
+  // GPS-derived heading fallback when compass unavailable
+  if (rotationEnabled && !compassAvailable && navActive) {
+    var gpsBearing = gpsHeadingFromPositions(lat, lng);
+    if (gpsBearing !== null) smoothAndApplyHeading(gpsBearing);
+  } else if (rotationEnabled && !navActive) {
+    var gpsBearing2 = gpsHeadingFromPositions(lat, lng);
+    if (gpsBearing2 !== null) smoothAndApplyHeading(gpsBearing2);
+  }
 
   if (!navSteps.length || !allRouteCoords.length) return;
 
@@ -2926,35 +2980,63 @@ function onDirectInput(val, target) {
   }, 500);
 }
 
+async function nominatimQuery(query, appendChennai) {
+  var q = appendChennai ? query + ' Chennai Tamil Nadu' : query;
+  var url = 'https://nominatim.openstreetmap.org/search' +
+    '?q=' + encodeURIComponent(q) +
+    '&format=json&limit=6' +
+    '&viewbox=79.8,12.3,80.5,13.5' +
+    '&bounded=0' +
+    '&countrycodes=in' +
+    '&addressdetails=1&accept-language=en';
+  var r = await fetch(url, { headers: { 'User-Agent': 'PrivNav/1.0' } });
+  return await r.json();
+}
+
 async function directNominatimSearch(query, target, resultsEl) {
   resultsEl.innerHTML = '<div style="color:#555e72;font-size:11px;padding:8px;text-align:center">Searching…</div>';
   resultsEl.style.display = 'block';
 
   try {
-    var url = 'https://nominatim.openstreetmap.org/search' +
-      '?q=' + encodeURIComponent(query) +
-      '&format=json&limit=5&viewbox=79.7,12.4,80.6,13.4&bounded=0&addressdetails=1&accept-language=en';
+    // Pass 1: direct query, India only
+    var results = await nominatimQuery(query, false);
 
-    var r = await fetch(url, { headers: { 'User-Agent': 'PrivNav/1.0' } });
-    var results = await r.json();
+    // Pass 2: append Chennai if no results
+    if (results.length === 0) {
+      results = await nominatimQuery(query, true);
+    }
+
+    // Pass 3: try first word only + Chennai
+    if (results.length === 0 && query.indexOf(' ') > 0) {
+      results = await nominatimQuery(query.split(' ')[0], true);
+    }
+
     resultsEl.innerHTML = '';
 
     if (results.length === 0) {
-      resultsEl.innerHTML = '<div style="color:#555e72;font-size:11px;padding:8px;text-align:center">No results</div>';
+      resultsEl.innerHTML =
+        '<div style="color:#555e72;font-size:11px;padding:10px;text-align:center">' +
+        'No results found.<br>' +
+        '<span style="color:#4f8ef7">Try a shorter name or nearby landmark</span>' +
+        '</div>';
       return;
     }
 
     results.forEach(function(place) {
-      var name = place.display_name.split(',')[0];
-      var lat  = parseFloat(place.lat);
-      var lng  = parseFloat(place.lon);
-      var full = place.display_name;
+      var parts = place.display_name.split(',');
+      var name = parts[0].trim();
+      var context = parts.length > 1 ? parts[1].trim() : '';
+      if (context && context.toLowerCase() !== name.toLowerCase()) {
+        name = name + ', ' + context;
+      }
+      var lat = parseFloat(place.lat);
+      var lng = parseFloat(place.lon);
 
       var item = document.createElement('div');
       item.style.cssText = 'padding:9px 10px;cursor:pointer;border-bottom:1px solid #232733;';
       item.innerHTML =
         '<div style="font-size:12px;font-weight:600;color:#c8cdd8">' + name + '</div>' +
-        '<div style="font-size:10px;color:#555e72;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + full + '</div>';
+        '<div style="font-size:10px;color:#555e72;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + place.display_name + '</div>';
 
       item.addEventListener('click', function() {
         var inp = document.getElementById(target + '-input');
@@ -2966,7 +3048,6 @@ async function directNominatimSearch(query, target, resultsEl) {
           originLat = lat; originLng = lng;
           addPinMarker(lat, lng, 'origin');
         } else {
-          // Clear previous destination completely before setting new one
           destLat = null; destLng = null;
           if (destPin) { map.removeLayer(destPin); destPin = null; }
           if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
@@ -2975,11 +3056,10 @@ async function directNominatimSearch(query, target, resultsEl) {
           document.getElementById('nav-btn').style.display = 'none';
           document.getElementById('chaff-status').style.display = 'none';
           stopRefreshTimer();
-          // Now set new destination
           destLat = lat; destLng = lng;
           addPinMarker(lat, lng, 'dest');
         }
-        map.setView([lat, lng], 14, { animate: true });
+        map.setView([lat, lng], 15, { animate: true });
         checkRouteReady();
       });
 
@@ -2988,6 +3068,7 @@ async function directNominatimSearch(query, target, resultsEl) {
 
   } catch(e) {
     resultsEl.innerHTML = '<div style="color:#e74c3c;font-size:11px;padding:8px">Search failed</div>';
+    console.error('Search error:', e);
   }
 }
 
@@ -3022,6 +3103,139 @@ document.addEventListener('visibilitychange', async function() {
     }
   }
 });
+
+
+// ── HEADING-UP MAP ROTATION ───────────────────────────────
+let currentHeading   = 0;   // degrees, 0 = north
+let headingSmoothed  = 0;
+let rotationEnabled  = false;
+let compassAvailable = false;
+let lastGpsLat       = null, lastGpsLng = null;
+let headingHistory   = [];
+const HEADING_SMOOTH = 8; // samples to average
+
+function startHeadingUp() {
+  rotationEnabled = true;
+  document.getElementById('map-wrap').classList.add('rotating');
+  document.getElementById('north-pill').classList.add('active');
+
+  // Try device compass first
+  if (window.DeviceOrientationEvent) {
+    if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+      // iOS 13+ requires permission
+      DeviceOrientationEvent.requestPermission()
+        .then(function(state) {
+          if (state === 'granted') {
+            window.addEventListener('deviceorientationabsolute', onDeviceOrientation, true);
+            window.addEventListener('deviceorientation', onDeviceOrientation, true);
+            compassAvailable = true;
+          }
+        }).catch(function() {
+          compassAvailable = false; // fall back to GPS bearing
+        });
+    } else {
+      // Android — just add listener, see if we get absolute heading
+      window.addEventListener('deviceorientationabsolute', onDeviceOrientation, true);
+      window.addEventListener('deviceorientation', onDeviceOrientation, true);
+      compassAvailable = true;
+    }
+  }
+}
+
+function stopHeadingUp() {
+  rotationEnabled = false;
+  compassAvailable = false;
+  window.removeEventListener('deviceorientationabsolute', onDeviceOrientation, true);
+  window.removeEventListener('deviceorientation', onDeviceOrientation, true);
+  document.getElementById('map-wrap').classList.remove('rotating');
+  document.getElementById('north-pill').classList.remove('active');
+  applyMapRotation(0);
+}
+
+function resetNorth() {
+  // Temporarily snap back to north without stopping rotation
+  applyMapRotation(0);
+  currentHeading = 0;
+  headingSmoothed = 0;
+}
+
+function onDeviceOrientation(e) {
+  if (!rotationEnabled) return;
+  var heading = null;
+
+  // Try absolute compass heading first
+  if (e.absolute && e.alpha !== null) {
+    heading = 360 - e.alpha; // convert to compass bearing
+  } else if (e.webkitCompassHeading !== undefined) {
+    heading = e.webkitCompassHeading; // iOS
+  } else if (e.alpha !== null) {
+    heading = 360 - e.alpha; // relative — less accurate
+  }
+
+  if (heading !== null && !isNaN(heading)) {
+    compassAvailable = true;
+    smoothAndApplyHeading(heading);
+  }
+}
+
+function gpsHeadingFromPositions(lat, lng) {
+  // Calculate bearing from last GPS position to current
+  if (lastGpsLat === null) { lastGpsLat = lat; lastGpsLng = lng; return null; }
+  if (haversine(lastGpsLat, lastGpsLng, lat, lng) < 5) return null; // too close
+
+  var dLng = (lng - lastGpsLng) * Math.PI / 180;
+  var lat1 = lastGpsLat * Math.PI / 180;
+  var lat2 = lat * Math.PI / 180;
+  var y = Math.sin(dLng) * Math.cos(lat2);
+  var x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+  var bearing = (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+
+  lastGpsLat = lat;
+  lastGpsLng = lng;
+  return bearing;
+}
+
+function smoothAndApplyHeading(heading) {
+  // Circular mean smoothing to avoid wrap-around artifacts
+  headingHistory.push(heading);
+  if (headingHistory.length > HEADING_SMOOTH) headingHistory.shift();
+
+  var sinSum = 0, cosSum = 0;
+  headingHistory.forEach(function(h) {
+    sinSum += Math.sin(h * Math.PI / 180);
+    cosSum += Math.cos(h * Math.PI / 180);
+  });
+  headingSmoothed = (Math.atan2(sinSum, cosSum) * 180 / Math.PI + 360) % 360;
+  applyMapRotation(headingSmoothed);
+}
+
+function applyMapRotation(heading) {
+  currentHeading = heading;
+  var mapEl = document.getElementById('map');
+  // Rotate map — scale up 1.5x to cover corners during rotation
+  mapEl.style.transform = 'rotate(' + (-heading) + 'deg) scale(1.5)';
+
+  // Counter-rotate UI elements to stay upright
+  var counterRot = 'rotate(' + heading + 'deg)';
+  var hud = document.getElementById('nav-hud');
+  var banner = document.getElementById('offroute-banner');
+  var recentre = document.getElementById('recentre-btn');
+  var hint = document.getElementById('map-hint');
+  if (hud) hud.style.transform = counterRot;
+  if (banner) banner.style.transform = counterRot;
+  if (recentre) recentre.style.transform = counterRot;
+  if (hint) hint.style.transform = counterRot;
+
+  // Update north pill to show current bearing
+  var pill = document.getElementById('north-pill');
+  if (pill && heading > 2) {
+    pill.textContent = '⬆ ' + Math.round(heading) + '° · tap to reset';
+    pill.style.transform = counterRot;
+  } else if (pill) {
+    pill.textContent = '⬆ N';
+    pill.style.transform = counterRot;
+  }
+}
 
 // ── BOOT ─────────────────────────────────────────────────
 initMap();
