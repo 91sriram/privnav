@@ -1557,8 +1557,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
 
         <!-- CHAFF STATUS -->
         <div id="chaff-status" style="display:none">
-          Sending <span class="chaff-count" id="chaff-count">4</span> decoy queries
-          alongside your real route for privacy
+          Sending <span class="chaff-count" id="chaff-count">4</span> decoy queries to GraphHopper alongside your real route
         </div>
         <button class="btn btn-nav" id="nav-btn" onclick="toggleNavigation()" style="display:none">
           ▶ Start Navigation
@@ -1620,7 +1619,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
 
         <!-- PRIVACY NOTE -->
         <div id="privacy-note">
-          <strong>Privacy design:</strong> Traffic tiles use bounding box only — no route sent. Routing queries are padded with <strong>4 chaff routes</strong> fired simultaneously so TomTom cannot identify your real journey. Use with ProtonVPN for full IP masking.
+          <strong>Privacy design:</strong> Routing via <strong>GraphHopper + OSM</strong> — TomTom never sees your route. Traffic tiles use bounding box only. GraphHopper queries padded with 4 chaff routes. Use with ProtonVPN for full IP masking.
         </div>
 
         <!-- CLEAR KEY -->
@@ -1639,6 +1638,7 @@ let panelVisible = true;
 
 // Persist API key locally (stays on device)
 const KEY_STORE = 'privnav_tt_key';
+const GH_KEY   = '10eb47ca-323f-45aa-a666-c55978a75e6a'; // GraphHopper
 
 // ── MAP INIT ────────────────────────────────────────────
 function initMap() {
@@ -2094,18 +2094,21 @@ function generateChaffPoints(count) {
 
 // Fire-and-forget chaff query — result is discarded
 async function fireChaffQuery(key, oLat, oLng, dLat, dLng) {
+  // Chaff via GraphHopper — GH sees a burst of Chennai-area queries
+  // cannot distinguish which is real
   try {
-    const url = `https://api.tomtom.com/routing/1/calculateRoute/` +
-      `${oLat},${oLng}:${dLat},${dLng}/json` +
-      `?key=${key}&traffic=true&travelMode=car&routeType=fastest`;
+    const url = 'https://graphhopper.com/api/1/route' +
+      '?point=' + oLat + ',' + oLng +
+      '&point=' + dLat + ',' + dLng +
+      '&profile=car&instructions=false&points_encoded=true' +
+      '&key=' + GH_KEY;
     await fetch(url); // result intentionally ignored
-  } catch (_) { /* silent — chaff failure is irrelevant */ }
+  } catch (_) { /* silent */ }
 }
 
 // ── ROUTE CALCULATION ────────────────────────────────────
 async function calculateRoute(silent = false) {
-  const key = getKey();
-  if (!key) { alert('Paste your TomTom API key first.'); return; }
+  const key = getKey(); // still need TomTom key for traffic tiles
   if (!originLat || !destLat) { alert('Set both origin and destination first.'); return; }
 
   if (!silent) showLoader(true);
@@ -2117,8 +2120,8 @@ async function calculateRoute(silent = false) {
     // Fire all requests simultaneously — real + chaff
     // TomTom sees a burst of 5 similar Chennai-area route queries
     const [realResult] = await Promise.all([
-      fetchRealRoute(key),
-      ...chaffPoints.map(p => fireChaffQuery(key, p.oLat, p.oLng, p.dLat, p.dLng)),
+      fetchRealRoute(GH_KEY),
+      ...chaffPoints.map(p => fireChaffQuery(GH_KEY, p.oLat, p.oLng, p.dLat, p.dLng)),
     ]);
 
     if (realResult) {
@@ -2136,95 +2139,69 @@ async function calculateRoute(silent = false) {
 }
 
 async function fetchRealRoute(key) {
-  const url = `https://api.tomtom.com/routing/1/calculateRoute/` +
-    `${originLat},${originLng}:${destLat},${destLng}/json` +
-    `?key=${key}` +
-    `&traffic=true` +
-    `&travelMode=car` +
-    `&routeType=fastest` +
-    `&computeTravelTimeFor=all` +
-    `&instructionsType=text` +
-    `&language=en-GB` +
-    `&sectionType=traffic` +
-    `&routeRepresentation=polyline`;
+  // GraphHopper routing API — OSM data, correctly handles Indian roads
+  const url = 'https://graphhopper.com/api/1/route' +
+    '?point=' + originLat + ',' + originLng +
+    '&point=' + destLat   + ',' + destLng +
+    '&profile=car' +
+    '&instructions=true' +
+    '&points_encoded=false' +
+    '&locale=en' +
+    '&key=' + GH_KEY;
 
   const r = await fetch(url);
-  if (!r.ok) throw new Error(`Routing API ${r.status}: ${await r.text()}`);
+  if (!r.ok) throw new Error('GraphHopper API ' + r.status + ': ' + await r.text());
   return await r.json();
 }
 
 function renderRoute(data) {
-  currentRouteData = data; // store for navigation
+  currentRouteData = data;
   document.getElementById('nav-btn').style.display = 'flex';
 
-  // Store totals for stable ETA (#4)
-  const sm = data.routes[0].summary;
-  routeTotalTimeSecs = sm.travelTimeInSeconds || 0;
-  routeTotalDistance = sm.lengthInMeters || 0;
-  parseTrafficSegments(data); // (#5) traffic colouring
-  // Clear previous route
+  // Clear previous route layers
   if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
+  if (routeSegLayers) { routeSegLayers.forEach(function(l){ map.removeLayer(l); }); routeSegLayers = []; }
 
-  const routes = data.routes;
-  if (!routes || routes.length === 0) { alert('No route found.'); return; }
+  // GraphHopper response: data.paths[0]
+  var path = data.paths && data.paths[0];
+  if (!path) { alert('No route found.'); return; }
 
-  const route = routes[0];
-  const summary = route.summary;
+  // Store totals for stable ETA
+  routeTotalTimeSecs = Math.round((path.time || 0) / 1000);
+  routeTotalDistance = path.distance || 0;
+  parseTrafficSegments(data); // traffic colouring if available
 
-  // Extract polyline points
-  const points = [];
-  for (const leg of route.legs) {
-    for (const point of leg.points) {
-      points.push([point.latitude, point.longitude]);
-    }
-  }
+  // Extract points — GH returns [lng,lat] pairs
+  var coords = path.points && path.points.coordinates;
+  if (!coords || coords.length < 2) { alert('No route geometry.'); return; }
+  var points = coords.map(function(c) { return [c[1], c[0]]; }); // [lat,lng]
 
-  // Draw route line — coloured by traffic if available (#5)
-  if (routeLayer) { map.removeLayer(routeLayer); }
-  if (routeSegLayers) { routeSegLayers.forEach(function(l){ map.removeLayer(l); }); }
-  routeSegLayers = [];
-
-  if (trafficSegments && trafficSegments.length > 0) {
-    for (let i = 1; i < points.length; i++) {
-      const colour = trafficColourForIndex(i);
-      const seg = L.polyline([points[i-1], points[i]], {
-        color: colour, weight: 5, opacity: 0.85, lineCap: 'round',
-      }).addTo(map);
-      routeSegLayers.push(seg);
-    }
-    routeLayer = routeSegLayers[0]; // reference for bounds
-  } else {
-    routeLayer = L.polyline(points, {
-      color: '#4f8ef7', weight: 5, opacity: 0.85, lineJoin: 'round', lineCap: 'round',
-    }).addTo(map);
-  }
+  // Draw route line
+  routeLayer = L.polyline(points, {
+    color: '#4f8ef7',
+    weight: 5,
+    opacity: 0.85,
+    lineJoin: 'round',
+    lineCap: 'round',
+  }).addTo(map);
 
   // Fit map to route
-  const allBounds = L.latLngBounds(points);
-  map.fitBounds(allBounds, { padding: [40, 40] });
+  map.fitBounds(L.latLngBounds(points), { padding: [40, 40] });
 
-  // Update summary panel
-  const travelMins  = Math.round(summary.travelTimeInSeconds / 60);
-  const delayMins   = Math.round((summary.trafficDelayInSeconds || 0) / 60);
-  const distKm      = (summary.lengthInMeters / 1000).toFixed(1);
+  // Update summary
+  var distKm   = (path.distance / 1000).toFixed(1);
+  var timeMins = Math.round(path.time / 60000);
+  var ascent   = path.ascend ? Math.round(path.ascend) + 'm ascent' : '';
 
-  document.getElementById('route-time').textContent = formatMins(travelMins);
+  document.getElementById('route-time').textContent = formatMins(timeMins);
   document.getElementById('route-time').className =
-    `route-stat-value ${travelMins < 20 ? 'good' : travelMins < 40 ? 'warn' : 'bad'}`;
-
-  document.getElementById('route-dist').textContent = `${distKm} km`;
+    'route-stat-value ' + (timeMins < 20 ? 'good' : timeMins < 40 ? 'warn' : 'bad');
+  document.getElementById('route-dist').textContent = distKm + ' km';
   document.getElementById('route-dist').className = 'route-stat-value';
-
-  document.getElementById('route-delay').textContent = delayMins > 0 ? `+${delayMins} min` : 'None';
-  document.getElementById('route-delay').className =
-    `route-stat-value ${delayMins === 0 ? 'good' : delayMins < 10 ? 'warn' : 'bad'}`;
-
-  // Via summary
-  const via = route.legs[0]?.summary?.batteryConsumptionInkWh !== undefined ? '' :
-    (summary.departureTime ? `Depart: ${new Date(summary.departureTime).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}` : '');
+  document.getElementById('route-delay').textContent = '—';
+  document.getElementById('route-delay').className = 'route-stat-value';
   document.getElementById('route-via').textContent =
-    `${points.length} waypoints · ${via}`;
-
+    points.length + ' waypoints · OSM via GraphHopper';
   document.getElementById('route-summary').style.display = 'flex';
 }
 
@@ -2327,72 +2304,54 @@ function formatDist(metres) {
 
 // ── EXTRACT STEPS FROM TOMTOM ROUTE ──────────────────────
 function extractNavSteps(routeData) {
-  const steps = [];
-  const route = routeData.routes[0];
+  var steps = [];
+  var path = routeData.paths && routeData.paths[0];
+  if (!path) return steps;
 
-  // Collect all route coords for polyline matching
-  for (const leg of route.legs) {
-    if (!leg.points) continue;
-    for (const point of leg.points) {
-      allRouteCoords.push([point.latitude, point.longitude]);
-    }
+  // Collect route coords
+  var coords = path.points && path.points.coordinates;
+  if (coords) {
+    allRouteCoords = coords.map(function(c) { return [c[1], c[0]]; });
   }
 
-  // TomTom returns guidance.instructions at route level
-  // Each instruction has: maneuver (object), routeOffsetInMeters, travelTimeInSeconds
-  // maneuver has: type, modifier, instruction (text)
-  const guidance = route.guidance;
-
-  if (guidance && guidance.instructions && guidance.instructions.length > 0) {
-    for (let i = 0; i < guidance.instructions.length; i++) {
-      const inst = guidance.instructions[i];
-
-      // TomTom instruction text is in inst.message or inst.maneuver.instruction
-      const text = inst.message
-        || (inst.maneuver && inst.maneuver.instruction)
-        || inst.instruction
-        || 'Continue';
-
-      const manType = (inst.maneuver && inst.maneuver.type)
-        || inst.type
-        || 'continue';
-
-      const manMod  = (inst.maneuver && inst.maneuver.modifier)
-        || inst.modifier
-        || '';
-
-      // Distance to this maneuver from route start
-      const offsetM = inst.routeOffsetInMeters || 0;
-
-      // Street name
-      const street  = inst.street || inst.roadName || '';
-
-      steps.push({
-        instruction: text,
-        street:      street,
-        distToNext:  offsetM,
-        maneuver:    manType,
-        modifier:    manMod,
-        _warned200:  false,
-      });
-    }
-  } else {
-    // Fallback — generate steps from leg summaries
-    console.warn('No guidance instructions in response, using fallback');
-    const totalDist = route.summary.lengthInMeters;
-    steps.push({
-      instruction: 'Head toward destination',
-      street: '', distToNext: 0,
-      maneuver: 'depart', modifier: '', _warned200: false,
-    });
-    steps.push({
-      instruction: 'You have arrived',
-      street: '', distToNext: totalDist,
-      maneuver: 'arrive', modifier: '', _warned200: false,
-    });
+  // GraphHopper sign integers → maneuver string
+  function signToManeuver(sign) {
+    var map = {
+      '-3': 'TURN_SHARP_LEFT',
+      '-2': 'TURN_LEFT',
+      '-1': 'TURN_SLIGHT_LEFT',
+       '0': 'STRAIGHT',
+       '1': 'TURN_SLIGHT_RIGHT',
+       '2': 'TURN_RIGHT',
+       '3': 'TURN_SHARP_RIGHT',
+       '4': 'ARRIVE',
+       '5': 'VIA',
+       '6': 'ROUNDABOUT',
+       '7': 'KEEP_LEFT',
+       '8': 'KEEP_RIGHT',
+      '-7': 'KEEP_LEFT',
+      '-8': 'KEEP_RIGHT',
+    };
+    return map[String(sign)] || 'STRAIGHT';
   }
 
-  console.log('Nav steps extracted:', steps.length, steps);
+  var instructions = path.instructions || [];
+  var cumDist = 0;
+
+  for (var i = 0; i < instructions.length; i++) {
+    var inst = instructions[i];
+    steps.push({
+      instruction: inst.text || 'Continue',
+      street:      inst.street_name || '',
+      distToNext:  cumDist,  // absolute offset from start in metres
+      maneuver:    signToManeuver(inst.sign),
+      modifier:    '',
+      _warned200:  false,
+    });
+    cumDist += (inst.distance || 0);
+  }
+
+  console.log('GH nav steps:', steps.length);
   return steps;
 }
 
