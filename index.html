@@ -10,7 +10,7 @@
 <meta name="theme-color" content="#0d0f14">
 <link rel="apple-touch-icon" href="icon-192.png">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>PrivNav v9 — Traffic Overlay</title>
+<title>PrivNav v10 — Traffic Overlay</title>
 
 <style>/* required styles */
 
@@ -3008,18 +3008,19 @@ async function directNominatimSearch(query, target, resultsEl) {
         '<div style="font-size:10px;color:#555e72;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + place.display_name + '</div>';
 
       item.addEventListener('click', function() {
-        var inp = document.getElementById(target + '-input');
-        inp.value = name;
         resultsEl.style.display = 'none';
         resultsEl.innerHTML = '';
 
         if (target === 'origin') {
           originLat = lat; originLng = lng;
+          document.getElementById('origin-input').value = name;
           addPinMarker(lat, lng, 'origin');
         } else {
-          // Clear previous destination completely before setting new one
+          // Clear previous destination state then set new one
           clearDestState();
           destLat = lat; destLng = lng;
+          // Set input value AFTER clearDestState so it doesn't get wiped
+          document.getElementById('dest-input').value = name;
           addPinMarker(lat, lng, 'dest');
         }
         map.setView([lat, lng], 15, { animate: true });
