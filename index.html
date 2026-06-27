@@ -75,6 +75,24 @@
     overflow: auto;
     box-shadow: 0 12px 32px rgba(0,0,0,0.38);
   }
+  /* FIX 2: Minimize button row — always visible at top of panel */
+  #panel-min-row {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  #panel-min-label {
+    font-size: 10px;
+    font-family: var(--mono);
+    color: var(--muted);
+    display: none;
+  }
+  #panel.minimized #panel-min-label { display: block; }
+  /* FIX 2: Collapse everything inside panel-body when minimized */
+  #panel.minimized #panel-body { display: none; }
+  #panel.minimized { gap: 0; padding: 6px 8px; overflow: visible; }
   .row { display: flex; gap: 8px; align-items: center; }
   .stack { display: flex; flex-direction: column; gap: 6px; }
   label { font-size: 10px; color: var(--muted); font-family: var(--mono); }
@@ -223,6 +241,31 @@
     font-family: var(--mono);
     font-size: 10px;
   }
+  /* FIX 1: Floating stop-navigation button — visible on all screen sizes during nav */
+  #nav-stop-float {
+    display: none;
+    position: absolute;
+    bottom: 28px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 6;
+    min-height: unset;
+    padding: 13px 36px;
+    background: var(--jam);
+    border: 2px solid rgba(255,255,255,0.2);
+    border-radius: 10px;
+    color: #fff;
+    font-size: 15px;
+    font-weight: 800;
+    box-shadow: 0 4px 20px rgba(231,76,60,0.45);
+    white-space: nowrap;
+  }
+  #nav-stop-float.visible { display: block; }
+  /* On wide screens keep the in-panel Stop button as primary; hide the float duplicate */
+  @media (min-width: 721px) {
+    #nav-stop-float { display: none !important; }
+  }
+  #pill-voice { cursor: pointer; user-select: none; }
   @media (max-width: 720px) {
     #topbar { gap: 6px; }
     #brand { font-size: 14px; }
@@ -239,6 +282,7 @@
     <div id="pill-gps" class="pill">NO GPS</div>
     <div id="pill-traffic" class="pill">TRAFFIC IDLE</div>
     <div id="pill-camera" class="pill">NORTH-UP</div>
+    <div id="pill-voice" class="pill ok" title="Toggle voice">VOICE</div>
   </div>
   <div id="map-wrap">
     <div id="map"></div>
@@ -259,28 +303,37 @@
       </div>
     </div>
     <button id="recentre" title="Recenter">◎</button>
+    <!-- FIX 1: Floating stop button shown on mobile during navigation -->
+    <button id="nav-stop-float">Stop Navigation</button>
     <div id="panel">
-      <div class="stack">
-        <label>Origin</label>
-        <div class="row">
-          <input id="origin-input" placeholder="Search origin, or use GPS" autocomplete="off">
-          <button class="icon" id="origin-gps" title="Use GPS">◎</button>
+      <!-- FIX 2: Minimize row — always rendered, collapses panel-body on click -->
+      <div id="panel-min-row">
+        <span id="panel-min-label">MENU</span>
+        <button class="icon" id="panel-toggle" title="Minimize panel">−</button>
+      </div>
+      <div id="panel-body">
+        <div class="stack">
+          <label>Origin</label>
+          <div class="row">
+            <input id="origin-input" placeholder="Search origin, or use GPS" autocomplete="off">
+            <button class="icon" id="origin-gps" title="Use GPS">◎</button>
+          </div>
+          <div id="origin-results" class="results"></div>
         </div>
-        <div id="origin-results" class="results"></div>
-      </div>
-      <div class="stack">
-        <label>Destination</label>
-        <input id="dest-input" placeholder="Search destination" autocomplete="off">
-        <div id="dest-results" class="results"></div>
-      </div>
-      <div class="row">
-        <button id="locate-btn">Locate</button>
-        <button id="route-btn" class="primary">Route</button>
-        <button id="nav-btn" class="primary">Navigate</button>
-      </div>
-      <div class="row">
-        <button id="traffic-btn">Refresh Traffic</button>
-        <button id="debug-btn">Debug</button>
+        <div class="stack">
+          <label>Destination</label>
+          <input id="dest-input" placeholder="Search destination" autocomplete="off">
+          <div id="dest-results" class="results"></div>
+        </div>
+        <div class="row">
+          <button id="locate-btn">Locate</button>
+          <button id="route-btn" class="primary">Route</button>
+          <button id="nav-btn" class="primary">Navigate</button>
+        </div>
+        <div class="row">
+          <button id="traffic-btn">Refresh Traffic</button>
+          <button id="debug-btn">Debug</button>
+        </div>
       </div>
     </div>
     <div id="toast"></div>
@@ -328,6 +381,14 @@ let wakeLock = null;
 let routeTotalDistance = 0;
 let routeTotalTimeSecs = 0;
 let debugLines = [];
+// FIX 3: flag set by explicit user actions so the next GPS fix flies the map
+let pendingFlyToGps = false;
+
+// Voice / TTS state
+let voiceMuted = false;
+let lastSpokenStep = -1;
+let voiceThresholdsFired = {};
+let iosTtsTimer = null;
 
 function $(id) { return document.getElementById(id); }
 
@@ -358,6 +419,54 @@ function toLngLat(latLng) {
 
 function toLatLng(lngLat) {
   return [lngLat[1], lngLat[0]];
+}
+
+function speak(text) {
+  if (voiceMuted || !window.speechSynthesis) return;
+  window.speechSynthesis.cancel();
+  const utt = new SpeechSynthesisUtterance(text);
+  utt.lang = 'en-US';
+  utt.rate = 1.0;
+  utt.volume = 1;
+  window.speechSynthesis.speak(utt);
+}
+
+// iOS Safari pauses speechSynthesis when the audio session is inactive; resume it periodically
+function startIosTtsKeepalive() {
+  iosTtsTimer = setInterval(function() {
+    if (window.speechSynthesis && window.speechSynthesis.paused) window.speechSynthesis.resume();
+  }, 5000);
+}
+function stopIosTtsKeepalive() {
+  clearInterval(iosTtsTimer);
+  iosTtsTimer = null;
+}
+
+function announceNavUpdate(stepIdx, progress) {
+  if (!navSteps.length) return;
+  const step = navSteps[stepIdx];
+  if (!step) return;
+
+  // When the step index changes, speak the new instruction immediately
+  if (stepIdx !== lastSpokenStep) {
+    lastSpokenStep = stepIdx;
+    voiceThresholdsFired = {};
+    const isArrival = stepIdx === navSteps.length - 1;
+    speak(isArrival ? 'You have arrived at your destination' : step.instruction);
+    return;
+  }
+
+  // Warn 500 m and 200 m before the next maneuver
+  const next = navSteps[stepIdx + 1];
+  if (!next) return;
+  const distToNext = Math.max(0, next.distFromStart - progress);
+  [500, 200].forEach(function(threshold) {
+    if (distToNext > 0 && distToNext <= threshold && !voiceThresholdsFired[threshold]) {
+      voiceThresholdsFired[threshold] = true;
+      const distStr = threshold < 1000 ? threshold + ' metres' : (threshold / 1000) + ' kilometres';
+      speak('In ' + distStr + ', ' + next.instruction);
+    }
+  });
 }
 
 function initMap() {
@@ -495,7 +604,11 @@ function circleFeature(lat, lng, radiusMeters) {
 }
 
 function initHandlers() {
-  $('locate-btn').addEventListener('click', startGps);
+  // FIX 3: set pendingFlyToGps before startGps so the first fix flies the map
+  $('locate-btn').addEventListener('click', function() {
+    pendingFlyToGps = true;
+    startGps();
+  });
   $('origin-gps').addEventListener('click', useGpsOrigin);
   $('route-btn').addEventListener('click', calculateRoute);
   $('nav-btn').addEventListener('click', toggleNavigation);
@@ -503,6 +616,19 @@ function initHandlers() {
   $('recentre').addEventListener('click', recentre);
   $('debug-btn').addEventListener('click', function() {
     $('debug').style.display = $('debug').style.display === 'block' ? 'none' : 'block';
+  });
+  // FIX 2: panel minimize toggle
+  $('panel-toggle').addEventListener('click', function() {
+    const minimized = $('panel').classList.toggle('minimized');
+    $('panel-toggle').textContent = minimized ? '+' : '−';
+  });
+  // FIX 1: floating stop button wired to stopNavigation
+  $('nav-stop-float').addEventListener('click', stopNavigation);
+  // Voice mute toggle
+  $('pill-voice').addEventListener('click', function() {
+    voiceMuted = !voiceMuted;
+    setPill('pill-voice', voiceMuted ? 'warn' : 'ok', voiceMuted ? 'MUTED' : 'VOICE');
+    if (voiceMuted && window.speechSynthesis) window.speechSynthesis.cancel();
   });
   bindSearch('origin');
   bindSearch('dest');
@@ -623,6 +749,11 @@ function onGps(pos) {
   setPill('pill-gps', acc < 80 ? 'ok' : 'warn', lat.toFixed(4) + ',' + lng.toFixed(4) + ' +' + acc + 'm');
   updateGpsMarker(lat, lng, acc);
   if (!origin) setOrigin(lat, lng, 'Current GPS');
+  // FIX 3: fly to GPS location when triggered by Locate or GPS origin button
+  if (pendingFlyToGps && !navActive) {
+    pendingFlyToGps = false;
+    map.easeTo({ center: [lng, lat], zoom: 16, duration: 800 });
+  }
   if (navActive) onNavPosition(pos);
 }
 
@@ -644,11 +775,15 @@ function updateGpsMarker(lat, lng, acc) {
 
 function useGpsOrigin() {
   if (userLat === null) {
+    // FIX 3: will fly when GPS arrives
+    pendingFlyToGps = true;
     startGps();
     toast('Getting GPS first');
     return;
   }
   setOrigin(userLat, userLng, 'Current GPS');
+  // FIX 3: fly immediately when GPS is already known
+  map.easeTo({ center: [userLng, userLat], zoom: 16, duration: 800 });
 }
 
 async function calculateRoute() {
@@ -727,6 +862,13 @@ async function startNavigation() {
   $('nav-btn').textContent = 'Stop';
   $('nav-btn').classList.add('danger');
   $('recentre').classList.remove('visible');
+  // FIX 1: show floating stop button (visible on mobile where panel is hidden)
+  $('nav-stop-float').classList.add('visible');
+  // Voice: reset state and announce start (called from button click → safe on iOS)
+  lastSpokenStep = -1;
+  voiceThresholdsFired = {};
+  speak('Navigation started. ' + (navSteps[0] ? navSteps[0].instruction : ''));
+  startIosTtsKeepalive();
   setPill('pill-camera', 'active', 'HEADING-UP');
   startHeading();
   await acquireWakeLock();
@@ -743,6 +885,13 @@ function stopNavigation() {
   $('nav-btn').textContent = 'Navigate';
   $('nav-btn').classList.remove('danger');
   $('recentre').classList.remove('visible');
+  // FIX 1: hide floating stop button
+  $('nav-stop-float').classList.remove('visible');
+  // Voice: cancel any ongoing speech and reset
+  if (window.speechSynthesis) window.speechSynthesis.cancel();
+  stopIosTtsKeepalive();
+  lastSpokenStep = -1;
+  voiceThresholdsFired = {};
   map.easeTo({ pitch: 0, bearing: 0, duration: 700 });
   map.getSource('remaining-route').setData(lineFeature([]));
   setPill('pill-camera', '', 'NORTH-UP');
@@ -793,6 +942,7 @@ function syncNavigation(lat, lng) {
   const distToManeuver = Math.max(0, next.distFromStart - progress);
   const remainDist = polylineLength(remaining);
   updateHud(navStep, distToManeuver, remainDist);
+  announceNavUpdate(navStep, progress);
   if (closest.distToRoute > OFF_ROUTE_THRESHOLD && (!lastAccuracy || lastAccuracy < 90)) {
     toast('Off route: recalculate manually for now');
   }
