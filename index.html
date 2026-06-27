@@ -10,7 +10,7 @@
 <meta name="theme-color" content="#0d0f14">
 <link rel="apple-touch-icon" href="icon-192.png">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>PrivNav v13 — Traffic Overlay</title>
+<title>PrivNav v14 — Traffic Overlay</title>
 
 <style>/* required styles */
 
@@ -1744,10 +1744,11 @@ function stopGpsWatch() { stopGpsPolling(); }
 
 function onGpsUpdate(pos) {
   var lat = pos.coords.latitude;
-  dbg("GPS fix: " + lat.toFixed(5) + "," + pos.coords.longitude.toFixed(5) + " acc:" + Math.round(pos.coords.accuracy) + "m");
   var lng = pos.coords.longitude;
   var acc = Math.round(pos.coords.accuracy);
+  dbg("GPS fix: " + lat.toFixed(5) + "," + lng.toFixed(5) + " acc:" + acc + "m");
 
+  // Always update internal position — even coarse fixes are useful for nav
   lastAccuracy = acc;
   userLat = lat;
   userLng = lng;
@@ -1760,10 +1761,14 @@ function onGpsUpdate(pos) {
   updateAccuracyCircle(lat, lng, acc);
 
   if (!gpsInitialised) {
+    // First fix — centre the map and kick off traffic fetch
     gpsInitialised = true;
     map.setView([lat, lng], 15);
     showLoader(false);
     fetchTrafficOnly();
+  } else if (!navActive && acc < (lastAccuracy || 9999)) {
+    // Accuracy improved while idle — silently re-centre map
+    map.setView([lat, lng], map.getZoom());
   }
 
   if (navActive) {
@@ -2375,7 +2380,8 @@ let navWatchId      = null;
 let navPolyline     = null; // remaining route line
 let allRouteCoords  = [];   // full route coords
 let wakeLock        = null;
-let offRouteCount   = 0;
+let offRouteCount        = 0;
+let autoRerouteInProgress = false;  // prevents reroute spam
 let routeTotalTimeSecs = 0;
 let routeTotalDistance = 0;
 let trafficSegments    = []; // for coloured route (#5)
@@ -2553,10 +2559,65 @@ function stopNavigation() {
   navCurrentStep = 0;
   allRouteCoords = [];
   offRouteCount = 0;
+  autoRerouteInProgress = false;
   lastGpsLat = null;
   lastGpsLng = null;
   mapClickMode = 'origin';
   showMapHint('Tap map to set origin');
+}
+
+// ── AUTO REROUTE FROM CURRENT GPS ────────────────────────
+// Called when off-route is confirmed. Silently recalculates route
+// from the driver's real GPS position to the same destination.
+async function autoRerouteFromGps(lat, lng) {
+  if (autoRerouteInProgress) return;
+  if (!destLat || !destLng) return;
+  autoRerouteInProgress = true;
+
+  dbg('Auto-reroute from ' + lat.toFixed(5) + ',' + lng.toFixed(5));
+  speak('Recalculating');
+
+  // Update origin to current GPS position
+  originLat = lat;
+  originLng = lng;
+
+  try {
+    const CHAFF_COUNT = 4;
+    const chaffPoints = generateChaffPoints(CHAFF_COUNT);
+    const [realResult] = await Promise.all([
+      fetchRealRoute(GH_KEY),
+      ...chaffPoints.map(p => fireChaffQuery(GH_KEY, p.oLat, p.oLng, p.dLat, p.dLng)),
+    ]);
+
+    if (realResult && navActive) {
+      // Update route data and re-extract steps without stopping navigation
+      currentRouteData = realResult;
+      var ghCoords = realResult.paths[0].points.coordinates;
+      allRouteCoords = ghCoords.map(function(c) { return [c[1], c[0]]; });
+      navSteps = extractNavSteps(realResult);
+      navCurrentStep = 0;
+      offRouteCount = 0;
+      lastAnnounceStep = -1;
+
+      // Redraw route on map
+      if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
+      if (routeSegLayers) { routeSegLayers.forEach(function(l){ map.removeLayer(l); }); routeSegLayers = []; }
+      routeLayer = L.polyline(allRouteCoords, {
+        color: '#4f8ef7', weight: 5, opacity: 0.85,
+        lineJoin: 'round', lineCap: 'round',
+      }).addTo(map);
+
+      document.getElementById('offroute-banner').style.display = 'none';
+      speak('Route updated');
+      dbg('Auto-reroute success: ' + navSteps.length + ' steps');
+    }
+  } catch(e) {
+    dbg('Auto-reroute failed: ' + e.message);
+    speak('Could not recalculate route');
+  } finally {
+    // Cooldown: don't reroute again for 15 seconds
+    setTimeout(function() { autoRerouteInProgress = false; }, 15000);
+  }
 }
 
 // ── GPS POSITION HANDLER ──────────────────────────────────
@@ -2579,11 +2640,16 @@ function onNavPosition(pos) {
   // Find closest point on route — this drives EVERYTHING
   const { closestIdx, distToRoute } = findClosestRoutePoint(lat, lng);
 
-  // ── OFF ROUTE DETECTION (#2) ──
+  // ── OFF ROUTE DETECTION + AUTO REROUTE ──
   if (distToRoute > OFF_ROUTE_THRESHOLD) {
     offRouteCount++;
     if (offRouteCount >= OFF_ROUTE_STRIKES) {
+      // Show banner immediately
       document.getElementById('offroute-banner').style.display = 'block';
+      // Auto-reroute from current GPS position if accuracy is reasonable
+      if (!autoRerouteInProgress && lastAccuracy < 80) {
+        autoRerouteFromGps(lat, lng);
+      }
     }
   } else {
     offRouteCount = 0;
