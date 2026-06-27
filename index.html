@@ -1694,11 +1694,16 @@ function initMap() {
 // ── GPS POLLING SYSTEM ───────────────────────────────────
 // Uses repeated getCurrentPosition instead of watchPosition
 // More reliable on OxygenOS which throttles watchPosition callbacks
-let gpsWatchId     = null;  // polling interval reference
-let gpsInitialised = false;
-let lastAccuracy   = null;
-let accuracyCircle = null;
-let gpsPollActive  = false;
+let gpsWatchId             = null;  // polling interval reference
+let gpsHighAccuracyWatchId = null;  // native watchPosition reference
+let gpsInitialised         = false;
+let lastAccuracy           = null;
+let accuracyCircle         = null;
+let gpsPollActive          = false;
+let gpsPollInFlight        = false;
+const GPS_POLL_MS          = 3000;
+const GPS_POLL_TIMEOUT_MS  = 12000;
+const GPS_WATCH_OPTIONS    = { enableHighAccuracy: true, maximumAge: 1000, timeout: 20000 };
 
 function locateAndFetch() {
   if (!navigator.geolocation) {
@@ -1716,30 +1721,55 @@ function startGpsPolling() {
   dbg("startGpsPolling called, active=" + gpsPollActive);
   if (gpsPollActive) return;
   gpsPollActive = true;
+
   pollGpsOnce(); // immediate first call
-  gpsWatchId = setInterval(pollGpsOnce, 3000); // then every 3 seconds
+  gpsWatchId = setInterval(pollGpsOnce, GPS_POLL_MS);
+
+  // Keep a native watch alive too. Some mobile browsers update watchPosition
+  // better while moving, while others prefer explicit polling, so we use both.
+  if (navigator.geolocation.watchPosition) {
+    gpsHighAccuracyWatchId = navigator.geolocation.watchPosition(
+      onGpsUpdate,
+      onGpsError,
+      GPS_WATCH_OPTIONS
+    );
+  }
 }
 
 function pollGpsOnce() {
+  if (!gpsPollActive || gpsPollInFlight) return;
+  gpsPollInFlight = true;
   dbg("GPS poll fired");
   navigator.geolocation.getCurrentPosition(
-    onGpsUpdate,
-    onGpsError,
+    function(pos) {
+      gpsPollInFlight = false;
+      onGpsUpdate(pos);
+    },
+    function(err) {
+      gpsPollInFlight = false;
+      onGpsError(err);
+    },
     {
       enableHighAccuracy: true,
       maximumAge: 0,
-      timeout: 10000,
+      timeout: GPS_POLL_TIMEOUT_MS,
     }
   );
 }
 
 function stopGpsPolling() {
   gpsPollActive = false;
+  gpsPollInFlight = false;
   if (gpsWatchId !== null) {
     clearInterval(gpsWatchId);
     gpsWatchId = null;
   }
+  if (gpsHighAccuracyWatchId !== null) {
+    navigator.geolocation.clearWatch(gpsHighAccuracyWatchId);
+    gpsHighAccuracyWatchId = null;
+  }
   gpsInitialised = false;
+  lastAccuracy = null;
   if (accuracyCircle) { map.removeLayer(accuracyCircle); accuracyCircle = null; }
 }
 
@@ -2522,9 +2552,9 @@ async function startNavigation() {
   // Speak first instruction
   updateHUD(0, 0);
   speak(navSteps[0] ? navSteps[0].instruction : 'Starting navigation');
-
-  // GPS polling already running — nav piggybacks on same stream
-  navWatchId = gpsWatchId;
+  // Ensure navigation has a live GPS stream even if the user set origin manually.
+  startGpsPolling();
+  navWatchId = gpsHighAccuracyWatchId || gpsWatchId;
 }
 
 function stopNavigation() {
@@ -3192,16 +3222,12 @@ async function acquireWakeLock() {
 // When page regains visibility (e.g. after a phone call), re-acquire (#6)
 document.addEventListener('visibilitychange', async function() {
   if (document.visibilityState === 'visible' && navActive) {
-    // Re-acquire wake lock — it gets dropped when page is hidden
+    // Re-acquire wake lock - it gets dropped when page is hidden
     await acquireWakeLock();
-    // Also re-acquire GPS watch in case it was suspended
-    if (navWatchId === null) {
-      navWatchId = navigator.geolocation.watchPosition(
-        onNavPosition,
-        function(err) { console.warn('Nav GPS error:', err.message); },
-        { enableHighAccuracy: true, maximumAge: 3000, timeout: 30000 }
-      );
-    }
+    // Restart the main GPS pipeline so marker, accuracy, HUD, and following all update.
+    if (!gpsPollActive) startGpsPolling();
+    pollGpsOnce();
+    navWatchId = gpsHighAccuracyWatchId || gpsWatchId;
   }
 });
 
