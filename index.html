@@ -358,6 +358,28 @@
     font-size: 10px;
   }
 
+  /* ── Diagnostic overlay ─────────────────────────── */
+  #diag {
+    display: none;
+    position: absolute;
+    left: 12px;
+    bottom: 12px;
+    z-index: 7;
+    min-width: 200px;
+    padding: 8px 10px;
+    background: rgba(0,0,0,0.82);
+    border: 1px solid #333;
+    border-radius: 6px;
+    font-family: var(--mono);
+    font-size: 10px;
+    line-height: 1.7;
+    color: #0f0;
+    pointer-events: none;
+  }
+  #diag.visible { display: block; }
+  #diag-row { display: flex; justify-content: space-between; gap: 12px; }
+  .dk { color: #888; }
+
   /* ── Mobile ──────────────────────────────────────── */
   @media (max-width: 720px) {
     #topbar { gap: 6px; }
@@ -472,6 +494,18 @@
       </div>
     </div>
 
+    <!-- Diagnostic overlay — visible only when DIAG_MODE = true -->
+    <div id="diag">
+      <div id="diag-row"><span class="dk">QUALITY</span><span id="dv-score">--</span></div>
+      <div id="diag-row"><span class="dk">ACCURACY</span><span id="dv-acc">--</span></div>
+      <div id="diag-row"><span class="dk">SPEED</span><span id="dv-spd">--</span></div>
+      <div id="diag-row"><span class="dk">HEADING</span><span id="dv-hdg">--</span></div>
+      <div id="diag-row"><span class="dk">KF GAIN</span><span id="dv-gain">--</span></div>
+      <div id="diag-row"><span class="dk">REJECTED</span><span id="dv-rej">0</span></div>
+      <div id="diag-row"><span class="dk">RAW→FILT</span><span id="dv-drift">--</span></div>
+      <div id="diag-row"><span class="dk">LERP</span><span id="dv-lerp">--</span></div>
+      <div id="diag-row"><span class="dk">INNOV</span><span id="dv-innov">--</span></div>
+    </div>
     <div id="toast"></div>
     <div id="debug"></div>
   </div>
@@ -488,6 +522,26 @@ const GPS_WATCH_OPTIONS = { enableHighAccuracy: true, maximumAge: 1000, timeout:
 const GPS_POLL_MS = 3000;
 const GPS_TIMEOUT_MS = 12000;
 const TRAFFIC_REFRESH_MS = 3 * 60 * 1000;
+
+// ── Navigation Filter Tuning ─────────────────────────────────────────────────
+// All values exposed here so they can be adjusted between test drives.
+const KF_PROCESS_NOISE_POS   = 2e-9;   // position variance added per update (deg²)
+const KF_PROCESS_NOISE_VEL   = 2e-10;  // velocity variance added per update (deg²/s²)
+const KF_MEAS_NOISE_BASE     = 3e-8;   // floor measurement noise (deg²), ~20 m at 111 320 m/deg
+const KF_CONF_WEIGHT_SCALE   = 2.0;    // exponent scale: how strongly confidence penalises R
+const KF_MAX_INNOVATION_M    = 180;    // innovation > this (m) → outlier reject (needs ≥3 fixes first)
+const OUTLIER_MAX_SPEED_MS   = 55;     // reject if implied speed > this m/s (≈ 200 km/h)
+const OUTLIER_MAX_JUMP_M     = 400;    // reject if position jump > this (m)
+const OUTLIER_MIN_ACCURACY   = 200;    // reject if GPS accuracy worse than this (m)
+const MARKER_LERP_ALPHA      = 0.08;   // display-position interpolation per rAF frame (~60 fps)
+const HEADING_LERP_ALPHA     = 0.12;   // heading interpolation per rAF frame
+const MAP_MATCH_SNAP_M       = 28;     // snap display dot to route if within this distance (m)
+const ETA_SPEED_WINDOW_MS    = 25000;  // rolling speed average window (ms)
+const ETA_BLEND_ALPHA        = 0.30;   // weight of current-speed ETA vs GraphHopper baseline
+const ETA_SMOOTH_ALPHA       = 0.08;   // ETA update smoothing factor
+const ETA_MIN_MOVE_MS        = 1.0;    // ignore speed samples below this (m/s) for ETA — filters stops
+const GPS_LOG_SIZE           = 300;    // rolling in-memory GPS log entries
+const DIAG_MODE              = false;  // set true to show diagnostic overlay while driving
 
 let map;
 let gpsMarker = null;
@@ -524,6 +578,34 @@ let trafficColors = [];          // per-routeCoords-index color string
 let lastTrafficRouteUpdate = 0;
 let offRouteCount = 0;           // consecutive off-route GPS readings
 let lastOffRouteWarnTime = 0;
+
+// ── Kalman filter state (two independent 1-D filters: lat, lng) ──────────────
+let kfLat = null;               // { x, v, p } where x=pos(deg), v=vel(deg/s), p=2×2 covariance
+let kfLng = null;
+let kfLastTime = 0;
+let kfInitialized = false;
+let kfUpdateCount = 0;
+
+// ── Display / navigation position split ──────────────────────────────────────
+let navLat  = null;             // filtered position → used for routing decisions
+let navLng  = null;
+let dispLat = null;             // animated display position → used only for GPS marker
+let dispLng = null;
+let dispHdg = 0;                // animated display heading (degrees)
+let tgtLat  = null;             // interpolation target (map-matched if navigating)
+let tgtLng  = null;
+let tgtHdg  = 0;
+let markerRafId = null;
+
+// ── GPS quality & log ────────────────────────────────────────────────────────
+let lastRawFix      = null;     // { lat, lng, acc, speed, heading, time } — last accepted fix
+let gpsLog          = [];       // rolling GPS_LOG_SIZE entries
+let rejectedCount   = 0;
+
+// ── ETA engine ───────────────────────────────────────────────────────────────
+let speedSamples   = [];        // { speed (m/s), time (ms) }
+let etaSmoothed    = 0;
+let currentRouteIdx = 0;        // updated in syncNavigation, read by updateHud
 
 // Voice state
 let voiceMuted = false;
@@ -640,6 +722,291 @@ function showRoutePreview() {
 
 function hideRoutePreview() {
   $('route-preview').classList.remove('visible');
+}
+
+/* ═══════════════════════════════════════════════════
+   NAVIGATION FILTER ENGINE
+   Each stage is isolated; tune via constants at top.
+   ═══════════════════════════════════════════════════ */
+
+/* ── 1. Kalman filter (two independent 1-D filters) ─ */
+function kf1dPredict(s, dt) {
+  // State transition: x_new = x + v*dt,  v_new = v
+  const x = s.x + s.v * dt;
+  const v = s.v;
+  // P = F*P*F' + Q  (F=[[1,dt],[0,1]], Q=diag([Q_pos, Q_vel]))
+  const p00 = s.p[0][0] + dt * (s.p[0][1] + s.p[1][0]) + dt * dt * s.p[1][1] + KF_PROCESS_NOISE_POS;
+  const p01 = s.p[0][1] + dt * s.p[1][1];
+  const p10 = s.p[1][0] + dt * s.p[1][1];
+  const p11 = s.p[1][1] + KF_PROCESS_NOISE_VEL;
+  return { x, v, p: [[p00, p01], [p10, p11]] };
+}
+
+function kf1dUpdate(s, meas, R) {
+  // H=[1,0]:  S = p00 + R,  K=[p00/S, p10/S],  y=meas-x
+  const S  = s.p[0][0] + R;
+  const K0 = s.p[0][0] / S;
+  const K1 = s.p[1][0] / S;
+  const y  = meas - s.x;
+  const x  = s.x + K0 * y;
+  const v  = s.v + K1 * y;
+  // P = (I - K*H)*P
+  const p00 = (1 - K0) * s.p[0][0];
+  const p01 = (1 - K0) * s.p[0][1];
+  const p10 = s.p[1][0] - K1 * s.p[0][0];
+  const p11 = s.p[1][1] - K1 * s.p[0][1];
+  return { x, v, p: [[p00, p01], [p10, p11]], K: K0, innovation: y };
+}
+
+function kfInit(lat, lng) {
+  const P0 = [[1e-6, 0], [0, 1e-8]]; // ~110 m pos, ~0.1 deg/s vel uncertainty
+  kfLat = { x: lat, v: 0, p: [P0[0].slice(), P0[1].slice()] };
+  kfLng = { x: lng, v: 0, p: [P0[0].slice(), P0[1].slice()] };
+  kfLastTime   = Date.now();
+  kfInitialized = true;
+  kfUpdateCount = 0;
+}
+
+function kfProcess(rawLat, rawLng, acc, confidence) {
+  const now = Date.now();
+  const dt  = Math.min((now - kfLastTime) / 1000, 10); // seconds, cap at 10s gap
+  kfLastTime = now;
+
+  if (!kfInitialized) { kfInit(rawLat, rawLng); }
+
+  // Predict
+  kfLat = kf1dPredict(kfLat, dt);
+  kfLng = kf1dPredict(kfLng, dt);
+
+  // Measurement noise: base scaled by accuracy and confidence
+  const accDeg = acc / 111320;
+  const R_raw  = Math.max(KF_MEAS_NOISE_BASE, accDeg * accDeg);
+  const R      = R_raw * Math.exp(KF_CONF_WEIGHT_SCALE * (1 - confidence / 100));
+
+  // Update
+  const resLat = kf1dUpdate(kfLat, rawLat, R);
+  const resLng = kf1dUpdate(kfLng, rawLng, R);
+  kfLat = resLat;
+  kfLng = resLng;
+  kfUpdateCount++;
+
+  return {
+    lat: resLat.x, lng: resLng.x,
+    gain: resLat.K,
+    innovation: haversine(kfLat.x, kfLng.x, rawLat, rawLng)
+  };
+}
+
+function kfPredictOnly() {
+  if (!kfInitialized) return;
+  const now = Date.now();
+  const dt  = Math.min((now - kfLastTime) / 1000, 10);
+  kfLastTime = now;
+  kfLat = kf1dPredict(kfLat, dt);
+  kfLng = kf1dPredict(kfLng, dt);
+}
+
+function headingFromKf() {
+  if (!kfInitialized) return null;
+  const cosLat = Math.cos(kfLat.x * Math.PI / 180);
+  const vy = kfLat.v * 111320;        // north m/s
+  const vx = kfLng.v * 111320 * cosLat; // east m/s
+  if (Math.abs(vy) < 1e-6 && Math.abs(vx) < 1e-6) return null;
+  return (Math.atan2(vx, vy) * 180 / Math.PI + 360) % 360;
+}
+
+function speedFromKf() {
+  if (!kfInitialized) return 0;
+  const cosLat = Math.cos(kfLat.x * Math.PI / 180);
+  const vy = kfLat.v * 111320;
+  const vx = kfLng.v * 111320 * cosLat;
+  return Math.sqrt(vx * vx + vy * vy); // m/s
+}
+
+/* ── 2. GPS Quality Score (0–100) ─────────────────── */
+function scoreGpsQuality(rawLat, rawLng, acc, speed, heading, now) {
+  let score = 100;
+  const factors = {};
+
+  // Accuracy score
+  const accScore = acc < 10 ? 100 : acc < 25 ? 90 : acc < 50 ? 75 : acc < 100 ? 55 : acc < 150 ? 30 : 0;
+  factors.accuracy = accScore;
+
+  // Time gap score
+  let timeScore = 100;
+  if (lastRawFix) {
+    const gap = (now - lastRawFix.time) / 1000;
+    timeScore = gap < 2 ? 100 : gap < 5 ? 90 : gap < 15 ? 70 : gap < 30 ? 40 : 20;
+  }
+  factors.time = timeScore;
+
+  // Speed consistency
+  let spdScore = 70;
+  if (lastRawFix && speed !== null) {
+    const dt = (now - lastRawFix.time) / 1000;
+    if (dt > 0) {
+      const dist = haversine(lastRawFix.lat, lastRawFix.lng, rawLat, rawLng);
+      const impliedSpd = dist / dt;
+      const prevSpd    = lastRawFix.speed || 0;
+      const deltaSpd   = Math.abs(impliedSpd - prevSpd);
+      spdScore = deltaSpd < 3 ? 100 : deltaSpd < 8 ? 85 : deltaSpd < 15 ? 65 : 40;
+    }
+  }
+  factors.speed = spdScore;
+
+  // Route proximity (during navigation)
+  let routeScore = 80;
+  if (navActive && routeCoords.length) {
+    const d = findClosestRoutePoint(rawLat, rawLng).distToRoute;
+    routeScore = d < 20 ? 100 : d < 50 ? 85 : d < 100 ? 65 : d < 200 ? 40 : 20;
+  }
+  factors.route = routeScore;
+
+  // Weighted average
+  score = Math.round(
+    accScore  * 0.40 +
+    timeScore * 0.15 +
+    spdScore  * 0.25 +
+    routeScore * 0.20
+  );
+
+  const cls = score >= 90 ? 'Excellent' : score >= 70 ? 'Good' : score >= 50 ? 'Moderate' : score >= 30 ? 'Poor' : 'Very Poor';
+  return { score: Math.max(0, Math.min(100, score)), cls, factors };
+}
+
+/* ── 3. Outlier Rejection ─────────────────────────── */
+function checkOutlier(rawLat, rawLng, acc, now) {
+  if (acc > OUTLIER_MIN_ACCURACY) return { rejected: true, reason: 'acc>' + Math.round(acc) + 'm' };
+
+  if (lastRawFix) {
+    const dt   = Math.max(0.1, (now - lastRawFix.time) / 1000);
+    const dist = haversine(lastRawFix.lat, lastRawFix.lng, rawLat, rawLng);
+    if (dist > OUTLIER_MAX_JUMP_M) return { rejected: true, reason: 'jump:' + Math.round(dist) + 'm' };
+    if (dist / dt > OUTLIER_MAX_SPEED_MS) return { rejected: true, reason: 'spd:' + Math.round(dist/dt) + 'm/s' };
+  }
+
+  // Innovation check only after KF is warmed up (3+ accepted fixes)
+  if (kfInitialized && kfUpdateCount > 3) {
+    kfLat = kf1dPredict(kfLat, Math.min((now - kfLastTime) / 1000, 10));
+    kfLng = kf1dPredict(kfLng, Math.min((now - kfLastTime) / 1000, 10));
+    const innov = haversine(kfLat.x, kfLng.x, rawLat, rawLng);
+    if (innov > KF_MAX_INNOVATION_M) return { rejected: true, reason: 'innov:' + Math.round(innov) + 'm' };
+  }
+
+  return { rejected: false, reason: null };
+}
+
+/* ── 4. Map Matching (display only) ──────────────────*/
+function mapMatchDisplay(filtLat, filtLng) {
+  if (!navActive || !routeCoords.length) return { lat: filtLat, lng: filtLng };
+  let bestDist = Infinity, snapLat = filtLat, snapLng = filtLng;
+  for (let i = 0; i < routeCoords.length - 1; i++) {
+    const p0 = routeCoords[i], p1 = routeCoords[i + 1];
+    const cosLat = Math.cos(filtLat * Math.PI / 180);
+    const x  = (filtLng - p0[1]) * cosLat * 111320;
+    const y  = (filtLat - p0[0]) * 111320;
+    const dx = (p1[1]  - p0[1]) * cosLat * 111320;
+    const dy = (p1[0]  - p0[0]) * 111320;
+    const lenSq = dx*dx + dy*dy;
+    const t = lenSq > 0 ? Math.max(0, Math.min(1, (x*dx + y*dy) / lenSq)) : 0;
+    const pLat = p0[0] + t * (p1[0] - p0[0]);
+    const pLng = p0[1] + t * (p1[1] - p0[1]);
+    const d = haversine(filtLat, filtLng, pLat, pLng);
+    if (d < bestDist) { bestDist = d; snapLat = pLat; snapLng = pLng; }
+  }
+  // Only snap when close enough — avoids snapping during off-road sections
+  if (bestDist <= MAP_MATCH_SNAP_M) return { lat: snapLat, lng: snapLng };
+  return { lat: filtLat, lng: filtLng };
+}
+
+/* ── 5. Marker Animation (rAF loop) ──────────────────*/
+function startMarkerAnimation() {
+  if (markerRafId !== null) return;
+  markerRafId = requestAnimationFrame(markerAnimFrame);
+}
+
+function stopMarkerAnimation() {
+  if (markerRafId !== null) { cancelAnimationFrame(markerRafId); markerRafId = null; }
+}
+
+function markerAnimFrame() {
+  if (tgtLat === null) { markerRafId = null; return; }
+
+  // Lerp position
+  dispLat += (tgtLat - dispLat) * MARKER_LERP_ALPHA;
+  dispLng += (tgtLng - dispLng) * MARKER_LERP_ALPHA;
+
+  // Lerp heading (handle 360° wraparound)
+  let dh = tgtHdg - dispHdg;
+  if (dh > 180) dh -= 360;
+  if (dh < -180) dh += 360;
+  dispHdg += dh * HEADING_LERP_ALPHA;
+
+  if (gpsMarker) gpsMarker.setLngLat([dispLng, dispLat]);
+
+  markerRafId = requestAnimationFrame(markerAnimFrame);
+}
+
+/* ── 6. GPS Log ───────────────────────────────────── */
+function logGpsFix(entry) {
+  gpsLog.push(entry);
+  if (gpsLog.length > GPS_LOG_SIZE) gpsLog.shift();
+}
+
+/* ── 7. ETA Engine ────────────────────────────────── */
+function recordSpeed(speedMs) {
+  speedSamples.push({ speed: speedMs, time: Date.now() });
+  const cutoff = Date.now() - ETA_SPEED_WINDOW_MS;
+  speedSamples = speedSamples.filter(function(s) { return s.time > cutoff; });
+}
+
+function rollingSpeedMs() {
+  const moving = speedSamples.filter(function(s) { return s.speed > ETA_MIN_MOVE_MS; });
+  if (moving.length < 4) return null;
+  return moving.reduce(function(a, b) { return a + b.speed; }, 0) / moving.length;
+}
+
+function trafficMultiplier(fromIdx) {
+  if (!trafficColors.length) return 1.0;
+  const ahead = trafficColors.slice(fromIdx);
+  if (!ahead.length) return 1.0;
+  const slow = ahead.filter(function(c) { return c === '#f1c40f'; }).length;
+  const jam  = ahead.filter(function(c) { return c === '#e74c3c'; }).length;
+  return 1 + (slow * 0.20 + jam * 0.50) / ahead.length;
+}
+
+function computeEta(remainingM, fromIdx) {
+  if (!routeTotalDistance || !routeTotalTimeSecs) return 0;
+  const baseline = routeTotalTimeSecs * (remainingM / routeTotalDistance);
+  if (baseline <= 0) return 0;
+
+  const spd = rollingSpeedMs();
+  const speedBased = spd ? remainingM / spd : baseline;
+  const tMult = trafficMultiplier(fromIdx);
+  const blended = ((1 - ETA_BLEND_ALPHA) * baseline + ETA_BLEND_ALPHA * speedBased) * tMult;
+
+  // Smooth — initialise on first call per trip
+  if (etaSmoothed === 0) { etaSmoothed = blended; return blended; }
+  etaSmoothed = etaSmoothed * (1 - ETA_SMOOTH_ALPHA) + blended * ETA_SMOOTH_ALPHA;
+  return etaSmoothed;
+}
+
+/* ── 8. Diagnostic overlay ────────────────────────── */
+function updateDiag(quality, acc, spd, hdg, kgain, innov, rawLat, rawLng) {
+  if (!DIAG_MODE) return;
+  const drift = (navLat !== null)
+    ? Math.round(haversine(rawLat, rawLng, navLat, navLng))
+    : 0;
+  const lerp = tgtLat ? Math.round(haversine(dispLat, dispLng, tgtLat, tgtLng)) : 0;
+  $('dv-score').textContent   = quality.score + ' (' + quality.cls + ')';
+  $('dv-acc').textContent     = Math.round(acc) + ' m';
+  $('dv-spd').textContent     = (spd * 3.6).toFixed(1) + ' km/h';
+  $('dv-hdg').textContent     = Math.round(hdg || 0) + '°';
+  $('dv-gain').textContent    = kgain.toFixed(4);
+  $('dv-rej').textContent     = rejectedCount;
+  $('dv-drift').textContent   = drift + ' m';
+  $('dv-lerp').textContent    = lerp + ' m';
+  $('dv-innov').textContent   = Math.round(innov) + ' m';
 }
 
 /* ── Map init ──────────────────────────────────────── */
@@ -905,42 +1272,112 @@ function pollGpsOnce() {
 }
 
 function onGps(pos) {
-  const lat = pos.coords.latitude;
-  const lng = pos.coords.longitude;
-  const acc = Math.round(pos.coords.accuracy || 0);
-  userLat = lat;
-  userLng = lng;
+  const rawLat  = pos.coords.latitude;
+  const rawLng  = pos.coords.longitude;
+  const acc     = pos.coords.accuracy  || 999;
+  const rawSpd  = pos.coords.speed     !== null ? pos.coords.speed : 0;
+  const rawHdg  = pos.coords.heading;
+  const now     = Date.now();
+
+  // Stage 1 – Quality Assessment
+  const quality = scoreGpsQuality(rawLat, rawLng, acc, rawSpd, rawHdg, now);
+
+  // Stage 2 – Outlier Rejection
+  const chk = checkOutlier(rawLat, rawLng, acc, now);
+  let filtLat, filtLng, kgain = 0, innov = 0;
+
+  if (chk.rejected) {
+    // Predict-only: advance KF in time without a measurement update
+    kfPredictOnly();
+    filtLat = kfInitialized ? kfLat.x : rawLat;
+    filtLng = kfInitialized ? kfLng.x : rawLng;
+    rejectedCount++;
+    dbg('GPS rejected – ' + chk.reason);
+  } else {
+    // Stage 3 – Kalman Filter Update
+    const kfr = kfProcess(rawLat, rawLng, acc, quality.score);
+    filtLat = kfr.lat;
+    filtLng = kfr.lng;
+    kgain   = kfr.gain;
+    innov   = kfr.innovation;
+    // Update speed history (prefer KF-derived speed, fall back to GPS speed)
+    recordSpeed(speedFromKf() || rawSpd);
+    // Accept this fix as the new "last raw" baseline
+    lastRawFix = { lat: rawLat, lng: rawLng, acc, speed: rawSpd, heading: rawHdg, time: now };
+  }
+
+  // Stage 4 – Map Matching (display position only, never used for routing)
+  const snapped = mapMatchDisplay(filtLat, filtLng);
+
+  // Navigation position (routing, off-route, voice)
+  navLat = filtLat;
+  navLng = filtLng;
+  userLat = filtLat;    // keep legacy alias in sync
+  userLng = filtLng;
   lastAccuracy = acc;
-  setPill('pill-gps', acc < 80 ? 'ok' : 'warn', lat.toFixed(4) + ',' + lng.toFixed(4) + ' +' + acc + 'm');
-  updateGpsMarker(lat, lng, acc);
-  if (!origin) setOrigin(lat, lng, 'Current GPS');
+
+  // Stage 5 – Smooth Marker Animation target
+  const kfHdg = headingFromKf();
+  const hdg = (rawHdg !== null && !isNaN(rawHdg)) ? rawHdg : (kfHdg !== null ? kfHdg : dispHdg);
+  tgtLat = snapped.lat;
+  tgtLng = snapped.lng;
+  tgtHdg = hdg;
+
+  // Seed display position on first fix so there is no initial jump
+  if (dispLat === null) {
+    dispLat = snapped.lat;
+    dispLng = snapped.lng;
+    dispHdg = hdg;
+  }
+
+  // Ensure marker exists and animation loop is running
+  if (!gpsMarker) {
+    gpsMarker = makeHtmlMarker('<div class="gps-dot"></div>', dispLng, dispLat);
+  }
+  startMarkerAnimation();
+
+  // Accuracy circle uses filtered position
+  if (accuracySourceReady) {
+    map.getSource('accuracy').setData(
+      acc > 30 ? circleFeature(filtLat, filtLng, acc) : { type: 'FeatureCollection', features: [] }
+    );
+  }
+
+  // GPS pill
+  const accRound = Math.round(acc);
+  setPill('pill-gps', accRound < 80 ? 'ok' : 'warn',
+    filtLat.toFixed(4) + ',' + filtLng.toFixed(4) + ' +' + accRound + 'm');
+
+  if (!origin) setOrigin(filtLat, filtLng, 'Current GPS');
 
   if (pendingFlyToGps && !navActive) {
     pendingFlyToGps = false;
     $('origin-gps').classList.remove('active');
-    if (!origin || origin.label === 'Current GPS') setOrigin(lat, lng, 'Current GPS');
-    flyToGpsWithSplash(lat, lng);
+    if (!origin || origin.label === 'Current GPS') setOrigin(filtLat, filtLng, 'Current GPS');
+    flyToGpsWithSplash(filtLat, filtLng);
   }
-  if (navActive) onNavPosition(pos);
+
+  // Stage 6 – Navigation update (uses filtered position, not display)
+  if (navActive) onNavPosition(filtLat, filtLng, hdg, rawSpd);
+
+  // Stage 7 – Diagnostic
+  if (DIAG_MODE) updateDiag(quality, acc, rawSpd, hdg, kgain, innov, rawLat, rawLng);
+
+  // Log every fix
+  logGpsFix({
+    ts: now, rawLat, rawLng, filtLat, filtLng,
+    dispLat: dispLat, dispLng: dispLng,
+    acc, speed: rawSpd, heading: hdg || 0,
+    confidence: quality.score,
+    rejected: chk.rejected, reason: chk.reason || null,
+    kgain, innovation: innov
+  });
 }
 
 function onGpsError(err) {
   $('origin-gps').classList.remove('active');
   setPill('pill-gps', err.code === err.PERMISSION_DENIED ? 'err' : 'warn', err.message || 'GPS ERROR');
   dbg('GPS error: ' + err.message);
-}
-
-function updateGpsMarker(lat, lng, acc) {
-  if (!gpsMarker) {
-    gpsMarker = makeHtmlMarker('<div class="gps-dot"></div>', lng, lat);
-  } else {
-    gpsMarker.setLngLat([lng, lat]);
-  }
-  if (accuracySourceReady) {
-    map.getSource('accuracy').setData(
-      acc > 30 ? circleFeature(lat, lng, acc) : { type: 'FeatureCollection', features: [] }
-    );
-  }
 }
 
 function useGpsOrigin() {
@@ -1039,6 +1476,14 @@ async function startNavigation() {
   offRouteCount = 0;
   lastOffRouteWarnTime = 0;
 
+  // Reset navigation filter state for new trip
+  kfInitialized = false; kfUpdateCount = 0; kfLat = null; kfLng = null;
+  lastRawFix = null;
+  speedSamples = []; etaSmoothed = 0; currentRouteIdx = 0;
+  dispLat = null; dispLng = null; tgtLat = null; tgtLng = null; dispHdg = 0; tgtHdg = 0;
+  rejectedCount = 0;
+  if (DIAG_MODE) $('diag').classList.add('visible');
+
   // Voice — called from button click, safe on iOS
   lastSpokenStep = -1;
   voiceThresholdsFired = {};
@@ -1076,6 +1521,10 @@ function stopNavigation() {
   map.getSource('traffic-route').setData({ type: 'FeatureCollection', features: [] });
   offRouteCount = 0;
 
+  // Stop filter animation loop
+  stopMarkerAnimation();
+  $('diag').classList.remove('visible');
+
   map.easeTo({ pitch: is3D ? 45 : 0, bearing: 0, duration: 700 });
   setPill('pill-camera', '', 'NORTH-UP');
   stopHeading();
@@ -1089,11 +1538,10 @@ function recentre() {
   map.easeTo({ center: [userLng, userLat], zoom: NAV_ZOOM, pitch: is3D ? 55 : NAV_PITCH, bearing: headingSmoothed, duration: 500 });
 }
 
-function onNavPosition(pos) {
-  const lat = pos.coords.latitude;
-  const lng = pos.coords.longitude;
-  const bearing = pos.coords.heading !== null && !isNaN(pos.coords.heading)
-    ? pos.coords.heading
+function onNavPosition(lat, lng, heading, speed) {
+  // Camera follows filtered nav position (not display-snapped position)
+  const bearing = (heading !== null && !isNaN(heading))
+    ? heading
     : gpsHeadingFromPositions(lat, lng);
   if (bearing !== null) smoothHeading(bearing);
   if (following) {
@@ -1113,6 +1561,7 @@ function syncNavigation(lat, lng) {
   if (!routeCoords.length || !navSteps.length) return;
   const closest = findClosestRoutePoint(lat, lng);
   const remaining = routeCoords.slice(closest.closestIdx);
+  currentRouteIdx = closest.closestIdx; // ETA engine reads this
 
   // Update traffic-colored ahead portion
   map.getSource('traffic-route').setData({
@@ -1157,9 +1606,8 @@ function updateHud(stepIdx, distToManeuver, remainDist) {
   const left = remainDist !== undefined ? remainDist : routeTotalDistance;
   $('meta-dist').textContent = formatDist(left);
   $('meta-step').textContent = navSteps.length ? (stepIdx + 1) + '/' + navSteps.length : '--';
-  const etaSecs = routeTotalDistance > 0 && routeTotalTimeSecs > 0
-    ? routeTotalTimeSecs * (left / routeTotalDistance) : 0;
-  $('meta-eta').textContent = etaSecs
+  const etaSecs = computeEta(left, currentRouteIdx);
+  $('meta-eta').textContent = etaSecs > 0
     ? new Date(Date.now() + etaSecs * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     : '--:--';
 }
