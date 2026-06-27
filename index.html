@@ -1656,7 +1656,8 @@ let panelVisible = true;
 
 // Persist API key locally (stays on device)
 const KEY_STORE = 'privnav_tt_key';
-const GH_KEY   = '10eb47ca-323f-45aa-a666-c55978a75e6a'; // GraphHopper
+const GH_KEY    = '10eb47ca-323f-45aa-a666-c55978a75e6a'; // GraphHopper
+const TT_KEY    = 'YOUR_TOMTOM_KEY_HERE';                 // TomTom — hardcoded for personal use
 
 // ── MAP INIT ────────────────────────────────────────────
 function initMap() {
@@ -1682,9 +1683,11 @@ function initMap() {
   // Init map click handler for route picking
   initMapClickHandler();
 
-  // Restore saved key
+  // Hardcoded key takes priority; fall back to localStorage if constant is not set
   const saved = localStorage.getItem(KEY_STORE);
-  if (saved) document.getElementById('api-key').value = saved;
+  const activeKey = TT_KEY || saved || '';
+  document.getElementById('api-key').value = activeKey;
+  if (activeKey) localStorage.setItem(KEY_STORE, activeKey);
 }
 
 // ── GPS ─────────────────────────────────────────────────
@@ -1713,19 +1716,15 @@ function startGpsPolling() {
   dbg("startGpsPolling called, active=" + gpsPollActive);
   if (gpsPollActive) return;
   gpsPollActive = true;
-  pollGpsOnce(); // immediate first call
-  gpsWatchId = setInterval(pollGpsOnce, 3000); // then every 3 seconds
-}
-
-function pollGpsOnce() {
-  dbg("GPS poll fired");
-  navigator.geolocation.getCurrentPosition(
+  // watchPosition streams fixes as fast as hardware allows (~1s when moving)
+  // avoids the stacking / freeze issue caused by setInterval + getCurrentPosition
+  gpsWatchId = navigator.geolocation.watchPosition(
     onGpsUpdate,
     onGpsError,
     {
       enableHighAccuracy: true,
-      maximumAge: 0,
-      timeout: 10000,
+      maximumAge: 3000,  // reuse cached fix if <3s old (battery saving when idle)
+      timeout: 30000,    // watchPosition manages its own retries — long timeout is fine
     }
   );
 }
@@ -1733,7 +1732,7 @@ function pollGpsOnce() {
 function stopGpsPolling() {
   gpsPollActive = false;
   if (gpsWatchId !== null) {
-    clearInterval(gpsWatchId);
+    navigator.geolocation.clearWatch(gpsWatchId); // not clearInterval
     gpsWatchId = null;
   }
   gpsInitialised = false;
@@ -1798,7 +1797,11 @@ function updateAccuracyCircle(lat, lng, acc) {
 }
 
 function placeGpsMarker(lat, lng) {
-  if (gpsMarker) map.removeLayer(gpsMarker);
+  if (gpsMarker) {
+    // Move existing marker — no flicker, no remove/add cycle
+    gpsMarker.setLatLng([lat, lng]);
+    return;
+  }
   const icon = L.divIcon({
     className: '',
     html: '<div class="gps-marker"></div>',
@@ -2513,8 +2516,9 @@ async function startNavigation() {
   updateHUD(0, 0);
   speak(navSteps[0] ? navSteps[0].instruction : 'Starting navigation');
 
-  // GPS polling already running — nav piggybacks on same stream
-  navWatchId = gpsWatchId;
+  // navActive = true is sufficient — onGpsUpdate calls onNavPosition when navActive
+  // navWatchId is kept as null; visibilitychange handler will restart if needed
+  navWatchId = null;
 }
 
 function stopNavigation() {
@@ -3145,13 +3149,9 @@ document.addEventListener('visibilitychange', async function() {
   if (document.visibilityState === 'visible' && navActive) {
     // Re-acquire wake lock — it gets dropped when page is hidden
     await acquireWakeLock();
-    // Also re-acquire GPS watch in case it was suspended
-    if (navWatchId === null) {
-      navWatchId = navigator.geolocation.watchPosition(
-        onNavPosition,
-        function(err) { console.warn('Nav GPS error:', err.message); },
-        { enableHighAccuracy: true, maximumAge: 3000, timeout: 30000 }
-      );
+    // Restart watchPosition if it was suspended (e.g. after phone call)
+    if (!gpsPollActive || gpsWatchId === null) {
+      startGpsPolling();
     }
   }
 });
