@@ -10,7 +10,7 @@
 <meta name="theme-color" content="#0d0f14">
 <link rel="apple-touch-icon" href="icon-192.png">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>PrivNav v10 — Traffic Overlay</title>
+<title>PrivNav v11 — Traffic Overlay</title>
 
 <style>/* required styles */
 
@@ -1670,32 +1670,107 @@ function initMap() {
 }
 
 // ── GPS ─────────────────────────────────────────────────
+// ── CONTINUOUS GPS TRACKING ──────────────────────────────
+let gpsWatchId      = null;   // persistent watch outside navigation
+let lastAccuracy    = null;   // metres
+let gpsInitialised  = false;  // first fix received
+
 function locateAndFetch() {
   if (!navigator.geolocation) {
     alert('Geolocation not supported by this browser.');
     return;
   }
 
+  // If already watching, just fetch traffic with current position
+  if (gpsWatchId !== null && userLat !== null) {
+    fetchTrafficOnly();
+    return;
+  }
+
   setPill('pill-gps', 'active', 'LOCATING…');
   showLoader(true);
 
-  navigator.geolocation.getCurrentPosition(
-    pos => {
-      userLat = pos.coords.latitude;
-      userLng = pos.coords.longitude;
-      setPill('pill-gps', 'ok', `${userLat.toFixed(4)}, ${userLng.toFixed(4)}`);
-      placeGpsMarker(userLat, userLng);
-      map.setView([userLat, userLng], 14);
-      fetchTrafficOnly();
-      preloadTilesForArea(userLat, userLng);
-    },
-    err => {
-      showLoader(false);
-      setPill('pill-gps', 'err', 'GPS ERROR');
-      alert('Could not get location: ' + err.message);
-    },
-    { enableHighAccuracy: true, timeout: 30000, maximumAge: 5000 }
+  // Start continuous watch — maximumAge:0 forces fresh hardware reading
+  gpsWatchId = navigator.geolocation.watchPosition(
+    onGpsUpdate,
+    onGpsError,
+    {
+      enableHighAccuracy: true,
+      maximumAge: 0,        // never use cached position
+      timeout: 30000,       // 30s to get a fix
+    }
   );
+}
+
+function onGpsUpdate(pos) {
+  var lat = pos.coords.latitude;
+  var lng = pos.coords.longitude;
+  var acc = Math.round(pos.coords.accuracy); // metres
+
+  lastAccuracy = acc;
+  userLat = lat;
+  userLng = lng;
+
+  // Show accuracy in GPS pill
+  var accStr = acc < 20 ? acc + 'm ✓' : acc < 100 ? acc + 'm' : acc + 'm ⚠';
+  setPill('pill-gps', acc < 100 ? 'ok' : 'warn',
+    lat.toFixed(4) + ', ' + lng.toFixed(4) + ' ±' + accStr);
+
+  placeGpsMarker(lat, lng);
+
+  // Show accuracy circle on map
+  updateAccuracyCircle(lat, lng, acc);
+
+  // On first fix — centre map and fetch traffic
+  if (!gpsInitialised) {
+    gpsInitialised = true;
+    map.setView([lat, lng], 15);
+    showLoader(false);
+    fetchTrafficOnly();
+  }
+
+  // If navigating, update nav position
+  if (navActive) {
+    onNavPosition(pos);
+  }
+}
+
+function onGpsError(err) {
+  showLoader(false);
+  if (err.code === err.TIMEOUT) {
+    setPill('pill-gps', 'warn', 'WEAK SIGNAL');
+  } else if (err.code === err.PERMISSION_DENIED) {
+    setPill('pill-gps', 'err', 'DENIED');
+    gpsWatchId = null;
+  } else {
+    setPill('pill-gps', 'warn', 'GPS ERROR');
+  }
+}
+
+// Accuracy circle on map
+let accuracyCircle = null;
+function updateAccuracyCircle(lat, lng, accuracyMetres) {
+  if (accuracyCircle) map.removeLayer(accuracyCircle);
+  // Only show circle if accuracy is poor (>50m)
+  if (accuracyMetres > 50) {
+    accuracyCircle = L.circle([lat, lng], {
+      radius: accuracyMetres,
+      color: '#4f8ef7',
+      fillColor: '#4f8ef7',
+      fillOpacity: 0.08,
+      weight: 1,
+      opacity: 0.4,
+    }).addTo(map);
+  }
+}
+
+function stopGpsWatch() {
+  if (gpsWatchId !== null) {
+    navigator.geolocation.clearWatch(gpsWatchId);
+    gpsWatchId = null;
+  }
+  gpsInitialised = false;
+  if (accuracyCircle) { map.removeLayer(accuracyCircle); accuracyCircle = null; }
 }
 
 function placeGpsMarker(lat, lng) {
@@ -2414,21 +2489,16 @@ async function startNavigation() {
   updateHUD(0, 0);
   speak(navSteps[0] ? navSteps[0].instruction : 'Starting navigation');
 
-  // Start GPS watch
-  navWatchId = navigator.geolocation.watchPosition(
-    onNavPosition,
-    err => console.warn('Nav GPS error:', err.message),
-    { enableHighAccuracy: true, maximumAge: 3000, timeout: 30000 }
-  );
+  // GPS already watching continuously — nav uses the same stream
+  // onGpsUpdate calls onNavPosition when navActive is true
+  navWatchId = gpsWatchId; // reference only, don't start a new watch
 }
 
 function stopNavigation() {
   navActive = false;
 
-  if (navWatchId !== null) {
-    navigator.geolocation.clearWatch(navWatchId);
-    navWatchId = null;
-  }
+  // Don't stop GPS watch — keep tracking continuously
+  navWatchId = null; // just clear the reference
 
   if (wakeLock) { wakeLock.release(); wakeLock = null; }
 
@@ -2468,18 +2538,14 @@ function onNavPosition(pos) {
   const lat = pos.coords.latitude;
   const lng = pos.coords.longitude;
 
-  // Update GPS marker and follow
-  userLat = lat; userLng = lng;
-  placeGpsMarker(lat, lng);
+  // GPS marker and position already updated by onGpsUpdate
+  // Just handle navigation-specific logic
   followGPS(lat, lng);
 
-  // GPS-derived heading fallback when compass unavailable
-  if (rotationEnabled && !compassAvailable && navActive) {
+  // GPS-derived heading
+  if (rotationEnabled && !compassAvailable) {
     var gpsBearing = gpsHeadingFromPositions(lat, lng);
     if (gpsBearing !== null) smoothAndApplyHeading(gpsBearing);
-  } else if (rotationEnabled && !navActive) {
-    var gpsBearing2 = gpsHeadingFromPositions(lat, lng);
-    if (gpsBearing2 !== null) smoothAndApplyHeading(gpsBearing2);
   }
 
   if (!navSteps.length || !allRouteCoords.length) return;
