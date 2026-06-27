@@ -519,6 +519,10 @@ let routeTotalTimeSecs = 0;
 let debugLines = [];
 let pendingFlyToGps = false;
 let is3D = false;
+let trafficColors = [];          // per-routeCoords-index color string
+let lastTrafficRouteUpdate = 0;
+let offRouteCount = 0;           // consecutive off-route GPS readings
+let lastOffRouteWarnTime = 0;
 
 // Voice state
 let voiceMuted = false;
@@ -696,9 +700,18 @@ function addRouteSources() {
   map.addLayer({ id: 'route-line', type: 'line', source: 'route',
     paint: { 'line-color': '#4f8ef7', 'line-width': 5, 'line-opacity': 0.95 } });
 
-  map.addSource('remaining-route', geojsonSource(lineFeature([])));
-  map.addLayer({ id: 'remaining-route', type: 'line', source: 'remaining-route',
-    paint: { 'line-color': '#2ecc71', 'line-width': 7, 'line-opacity': 0.95 } });
+  map.addSource('traffic-route', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+  map.addLayer({
+    id: 'traffic-route',
+    type: 'line',
+    source: 'traffic-route',
+    layout: { 'line-join': 'round', 'line-cap': 'round' },
+    paint: {
+      'line-color': ['coalesce', ['get', 'color'], '#4f8ef7'],
+      'line-width': 6,
+      'line-opacity': 0.95
+    }
+  });
 }
 
 function addTrafficLayer() {
@@ -960,7 +973,8 @@ async function calculateRoute() {
     navSteps = extractSteps(path);
     navStep = 0;
     map.getSource('route').setData(lineFeature(routeCoords));
-    map.getSource('remaining-route').setData(lineFeature([]));
+    map.getSource('traffic-route').setData({ type: 'FeatureCollection', features: [] });
+    trafficColors = [];
     fitRoute(routeCoords);
     setPill('pill-camera', '', 'ROUTE READY');
     showRoutePreview();
@@ -1016,6 +1030,14 @@ async function startNavigation() {
   $('recentre').classList.remove('visible');
   $('nav-stop-float').classList.add('visible');
 
+  // Fade full route so only traffic-colored ahead portion dominates
+  map.setPaintProperty('route-line',   'line-opacity', 0.18);
+  map.setPaintProperty('route-casing', 'line-opacity', 0.18);
+  // Reset traffic + off-route state; trigger immediate fetch on first syncNavigation
+  lastTrafficRouteUpdate = 0;
+  offRouteCount = 0;
+  lastOffRouteWarnTime = 0;
+
   // Voice — called from button click, safe on iOS
   lastSpokenStep = -1;
   voiceThresholdsFired = {};
@@ -1047,8 +1069,13 @@ function stopNavigation() {
   lastSpokenStep = -1;
   voiceThresholdsFired = {};
 
+  // Restore full route appearance and clear traffic overlay
+  map.setPaintProperty('route-line',   'line-opacity', 0.95);
+  map.setPaintProperty('route-casing', 'line-opacity', 0.9);
+  map.getSource('traffic-route').setData({ type: 'FeatureCollection', features: [] });
+  offRouteCount = 0;
+
   map.easeTo({ pitch: is3D ? 45 : 0, bearing: 0, duration: 700 });
-  map.getSource('remaining-route').setData(lineFeature([]));
   setPill('pill-camera', '', 'NORTH-UP');
   stopHeading();
   if (wakeLock) { wakeLock.release().catch(function(){}); wakeLock = null; }
@@ -1085,7 +1112,19 @@ function syncNavigation(lat, lng) {
   if (!routeCoords.length || !navSteps.length) return;
   const closest = findClosestRoutePoint(lat, lng);
   const remaining = routeCoords.slice(closest.closestIdx);
-  map.getSource('remaining-route').setData(lineFeature(remaining));
+
+  // Update traffic-colored ahead portion
+  map.getSource('traffic-route').setData({
+    type: 'FeatureCollection',
+    features: buildColoredFeatures(remaining, closest.closestIdx)
+  });
+
+  // Throttled traffic color refresh (every TRAFFIC_REFRESH_MS)
+  if (Date.now() - lastTrafficRouteUpdate > TRAFFIC_REFRESH_MS) {
+    lastTrafficRouteUpdate = Date.now();
+    fetchAndUpdateTrafficColors(closest.closestIdx);
+  }
+
   const progress = polylineLength(routeCoords.slice(0, closest.closestIdx + 1));
   for (let i = 0; i < navSteps.length; i++) {
     if (navSteps[i].distFromStart <= progress + 10) navStep = Math.min(i, navSteps.length - 1);
@@ -1095,8 +1134,17 @@ function syncNavigation(lat, lng) {
   const remainDist = polylineLength(remaining);
   updateHud(navStep, distToManeuver, remainDist);
   announceNavUpdate(navStep, progress);
-  if (closest.distToRoute > OFF_ROUTE_THRESHOLD && (!lastAccuracy || lastAccuracy < 90)) {
-    toast('Off route: recalculate manually for now');
+
+  // Off-route: accuracy-aware threshold + must see 5 consecutive bad readings + 2 min cooldown
+  const threshold = lastAccuracy ? Math.max(50, lastAccuracy * 1.5) : 50;
+  if (closest.distToRoute > threshold) {
+    offRouteCount++;
+    if (offRouteCount >= 5 && Date.now() - lastOffRouteWarnTime > 120000) {
+      lastOffRouteWarnTime = Date.now();
+      toast('Possible off route — recalculate if needed');
+    }
+  } else {
+    offRouteCount = 0;
   }
 }
 
@@ -1180,6 +1228,115 @@ function smoothHeading(heading) {
   if (navActive) setPill('pill-camera', 'active', Math.round(headingSmoothed) + ' deg');
 }
 
+/* ── Geometry helpers ──────────────────────────────── */
+function pointToSegmentDist(lat, lng, p0, p1) {
+  // Flat-earth projection — accurate enough for segments < ~20 km
+  const cosLat = Math.cos(lat * Math.PI / 180);
+  const x  = (lng  - p0[1]) * cosLat * 111320;
+  const y  = (lat  - p0[0]) * 111320;
+  const dx = (p1[1] - p0[1]) * cosLat * 111320;
+  const dy = (p1[0] - p0[0]) * 111320;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq === 0) return Math.sqrt(x * x + y * y);
+  const t  = Math.max(0, Math.min(1, (x * dx + y * dy) / lenSq));
+  return Math.sqrt((x - t * dx) ** 2 + (y - t * dy) ** 2);
+}
+
+/* ── Traffic route coloring ────────────────────────── */
+function ratioToTrafficColor(ratio) {
+  if (ratio > 0.75) return '#4f8ef7'; // free  — blue
+  if (ratio > 0.45) return '#f1c40f'; // slow  — yellow
+  return '#e74c3c';                   // jam   — red
+}
+
+async function fetchFlowForPoint(lat, lng) {
+  try {
+    const url = 'https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/10/json' +
+      '?key=' + TT_KEY + '&point=' + lat + ',' + lng + '&unit=KMPH';
+    const ctrl = new AbortController();
+    const tid = setTimeout(function() { ctrl.abort(); }, 6000);
+    const r = await fetch(url, { signal: ctrl.signal });
+    clearTimeout(tid);
+    if (!r.ok) return 1;
+    const data = await r.json();
+    const seg = data.flowSegmentData;
+    if (!seg || !seg.freeFlowSpeed || seg.freeFlowSpeed === 0) return 1;
+    return Math.min(1, Math.max(0, seg.currentSpeed / seg.freeFlowSpeed));
+  } catch(e) { return 1; }
+}
+
+async function fetchAndUpdateTrafficColors(fromIdx) {
+  if (!routeCoords.length) return;
+  const segment = routeCoords.slice(fromIdx);
+  if (segment.length < 2) return;
+
+  // Up to 8 evenly-spaced sample points along the remaining route
+  const totalLen = polylineLength(segment);
+  const interval = Math.max(400, totalLen / 8);
+  const samples = [{ coord: segment[0], routeIdx: fromIdx }];
+  let accumulated = 0;
+  for (let i = 1; i < segment.length; i++) {
+    accumulated += haversine(segment[i-1][0], segment[i-1][1], segment[i][0], segment[i][1]);
+    if (accumulated >= interval) {
+      samples.push({ coord: segment[i], routeIdx: fromIdx + i });
+      accumulated = 0;
+    }
+  }
+
+  const results = await Promise.all(samples.map(async function(s) {
+    const ratio = await fetchFlowForPoint(s.coord[0], s.coord[1]);
+    return { routeIdx: s.routeIdx, ratio: ratio };
+  }));
+
+  // Paint each route coord with the color of its nearest sample
+  for (let i = fromIdx; i < routeCoords.length; i++) {
+    let bestRatio = 1, bestDist = Infinity;
+    for (let j = 0; j < results.length; j++) {
+      const d = haversine(routeCoords[i][0], routeCoords[i][1],
+                          routeCoords[results[j].routeIdx][0], routeCoords[results[j].routeIdx][1]);
+      if (d < bestDist) { bestDist = d; bestRatio = results[j].ratio; }
+    }
+    trafficColors[i] = ratioToTrafficColor(bestRatio);
+  }
+
+  // Redraw ahead portion if navigating
+  if (navActive && userLat !== null) {
+    const cl = findClosestRoutePoint(userLat, userLng);
+    const rem = routeCoords.slice(cl.closestIdx);
+    map.getSource('traffic-route').setData({
+      type: 'FeatureCollection',
+      features: buildColoredFeatures(rem, cl.closestIdx)
+    });
+  }
+}
+
+function buildColoredFeatures(remaining, startIdx) {
+  if (remaining.length < 2) return [];
+  const features = [];
+  let currentColor = trafficColors[startIdx] || '#4f8ef7';
+  let seg = [remaining[0]];
+  for (let i = 1; i < remaining.length; i++) {
+    const color = trafficColors[startIdx + i] || '#4f8ef7';
+    if (color === currentColor) {
+      seg.push(remaining[i]);
+    } else {
+      if (seg.length >= 2) features.push(coloredLineFeature(seg, currentColor));
+      currentColor = color;
+      seg = [remaining[i - 1], remaining[i]]; // 1-coord overlap closes gaps
+    }
+  }
+  if (seg.length >= 2) features.push(coloredLineFeature(seg, currentColor));
+  return features;
+}
+
+function coloredLineFeature(latLngs, color) {
+  return {
+    type: 'Feature',
+    properties: { color: color },
+    geometry: { type: 'LineString', coordinates: latLngs.map(toLngLat) }
+  };
+}
+
 /* ── Traffic ───────────────────────────────────────── */
 async function refreshTraffic() {
   if (!map.getLayer('tomtom-flow')) return;
@@ -1245,10 +1402,17 @@ document.addEventListener('visibilitychange', function() {
 
 function findClosestRoutePoint(lat, lng) {
   let bestIdx = 0, bestDist = Infinity;
-  routeCoords.forEach(function(c, idx) {
-    const d = haversine(lat, lng, c[0], c[1]);
-    if (d < bestDist) { bestDist = d; bestIdx = idx; }
-  });
+  // Project onto each segment rather than just measuring to vertices
+  for (let i = 0; i < routeCoords.length - 1; i++) {
+    const d = pointToSegmentDist(lat, lng, routeCoords[i], routeCoords[i + 1]);
+    if (d < bestDist) { bestDist = d; bestIdx = i; }
+  }
+  // Check final vertex
+  if (routeCoords.length > 1) {
+    const dLast = haversine(lat, lng,
+      routeCoords[routeCoords.length - 1][0], routeCoords[routeCoords.length - 1][1]);
+    if (dLast < bestDist) { bestDist = dLast; bestIdx = routeCoords.length - 1; }
+  }
   return { closestIdx: bestIdx, distToRoute: bestDist };
 }
 
