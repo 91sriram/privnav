@@ -173,11 +173,12 @@
     font-size: 10px;
     font-family: var(--mono);
     font-weight: 700;
-    padding: 4px 8px;
+    padding: 4px 9px;
     min-height: unset;
     height: 28px;
     border-radius: 5px;
     color: var(--muted);
+    white-space: nowrap;
   }
   #btn-3d.active { color: var(--accent); border-color: rgba(79,142,247,0.5); }
 
@@ -436,7 +437,7 @@
     <div id="panel">
       <div id="panel-min-row">
         <span id="panel-min-label">MENU</span>
-        <button id="btn-3d" title="Toggle 3D view">3D</button>
+        <button id="btn-3d" title="Toggle 3D buildings">3D Buildings</button>
         <button class="icon" id="panel-toggle" title="Minimize panel">−</button>
       </div>
       <div id="panel-body">
@@ -666,6 +667,10 @@ function initMap() {
     addAccuracyLayer();
     initHandlers();
 
+    // Hide the style's built-in fill-extrusion layer so default view stays 2D.
+    // It is re-shown only when the user enables "3D Buildings".
+    map.setLayoutProperty('building-3d', 'visibility', 'none');
+
     // Dismiss initial splash
     $('splash').classList.add('fade-out');
     setTimeout(function() { $('splash').style.display = 'none'; }, 450);
@@ -780,14 +785,10 @@ function initHandlers() {
     if (navActive) return;
     is3D = !is3D;
     $('btn-3d').classList.toggle('active', is3D);
-    map.easeTo({ pitch: is3D ? 45 : 0, duration: 600 });
-    try {
-      map.getStyle().layers.forEach(function(layer) {
-        if (layer.type === 'fill-extrusion') {
-          map.setLayoutProperty(layer.id, 'visibility', is3D ? 'visible' : 'none');
-        }
-      });
-    } catch(e) {}
+    // Swap 2-D flat footprints ↔ fill-extrusion buildings
+    map.setLayoutProperty('building',    'visibility', is3D ? 'none'    : 'visible');
+    map.setLayoutProperty('building-3d', 'visibility', is3D ? 'visible' : 'none');
+    map.easeTo({ pitch: is3D ? 55 : 0, duration: 600 });
   });
 
   // Voice mute toggle
@@ -1049,7 +1050,7 @@ async function startNavigation() {
   startHeading();
   await acquireWakeLock();
   if (userLat !== null) {
-    map.easeTo({ center: [userLng, userLat], zoom: NAV_ZOOM, pitch: NAV_PITCH, bearing: headingSmoothed, duration: 700 });
+    map.easeTo({ center: [userLng, userLat], zoom: NAV_ZOOM, pitch: is3D ? 55 : NAV_PITCH, bearing: headingSmoothed, duration: 700 });
   }
   updateHud(0, 0);
 }
@@ -1085,7 +1086,7 @@ function recentre() {
   if (userLat === null) return;
   following = true;
   $('recentre').classList.remove('visible');
-  map.easeTo({ center: [userLng, userLat], zoom: NAV_ZOOM, pitch: NAV_PITCH, bearing: headingSmoothed, duration: 500 });
+  map.easeTo({ center: [userLng, userLat], zoom: NAV_ZOOM, pitch: is3D ? 55 : NAV_PITCH, bearing: headingSmoothed, duration: 500 });
 }
 
 function onNavPosition(pos) {
@@ -1099,7 +1100,7 @@ function onNavPosition(pos) {
     map.easeTo({
       center: [lng, lat],
       zoom: NAV_ZOOM,
-      pitch: NAV_PITCH,
+      pitch: is3D ? 55 : NAV_PITCH,
       bearing: headingSmoothed,
       duration: 650,
       easing: function(t) { return t; }
