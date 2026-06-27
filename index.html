@@ -241,12 +241,9 @@
   #recentre.visible { display: flex; }
 
   /* ── Markers ─────────────────────────────────────── */
-  .gps-dot {
-    width: 18px; height: 18px;
-    border-radius: 50%;
-    background: var(--accent);
-    border: 3px solid #fff;
-    box-shadow: 0 0 0 4px rgba(79,142,247,0.35);
+  .gps-arrow-wrap {
+    filter: drop-shadow(0 2px 5px rgba(0,0,0,0.45));
+    line-height: 0; /* collapse whitespace around SVG */
   }
   .pin {
     width: 22px; height: 22px;
@@ -942,7 +939,10 @@ function markerAnimFrame() {
   if (dh < -180) dh += 360;
   dispHdg += dh * HEADING_LERP_ALPHA;
 
-  if (gpsMarker) gpsMarker.setLngLat([dispLng, dispLat]);
+  if (gpsMarker) {
+    gpsMarker.setLngLat([dispLng, dispLat]);
+    gpsMarker.setRotation(dispHdg);
+  }
 
   markerRafId = requestAnimationFrame(markerAnimFrame);
 }
@@ -1228,6 +1228,27 @@ async function searchPlace(query, resultsEl, onPick) {
 }
 
 /* ── Markers ───────────────────────────────────────── */
+// Navigation arrow SVG — tip at top (north = heading 0°).
+// Outer white path gives the halo; inner blue path is the arrow body.
+const GPS_ARROW_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="28" height="38" viewBox="0 0 28 38">' +
+    '<path d="M14 1 L27 36 L14 27 L1 36 Z" fill="white" opacity="0.9"/>' +
+    '<path d="M14 4 L25 33 L14 24.5 L3 33 Z" fill="#4f8ef7"/>' +
+    '<circle cx="14" cy="14" r="2.5" fill="white" opacity="0.55"/>' +
+  '</svg>';
+
+function makeGpsMarker(lng, lat) {
+  const el = document.createElement('div');
+  el.className = 'gps-arrow-wrap';
+  el.innerHTML = GPS_ARROW_SVG;
+  return new maplibregl.Marker({
+    element: el,
+    rotation: 0,
+    rotationAlignment: 'map',   // rotation degrees are relative to north on the map
+    pitchAlignment: 'viewport'  // stays upright when 3D pitch is applied
+  }).setLngLat([lng, lat]).addTo(map);
+}
+
 function makeHtmlMarker(html, lng, lat) {
   const el = document.createElement('div');
   el.innerHTML = html;
@@ -1332,7 +1353,7 @@ function onGps(pos) {
 
   // Ensure marker exists and animation loop is running
   if (!gpsMarker) {
-    gpsMarker = makeHtmlMarker('<div class="gps-dot"></div>', dispLng, dispLat);
+    gpsMarker = makeGpsMarker(dispLng, dispLat);
   }
   startMarkerAnimation();
 
