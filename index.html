@@ -10,7 +10,7 @@
 <meta name="theme-color" content="#0d0f14">
 <link rel="apple-touch-icon" href="icon-192.png">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>PrivNav v14 — Traffic Overlay</title>
+<title>PrivNav v15 — Traffic Overlay</title>
 
 <style>/* required styles */
 
@@ -1696,19 +1696,19 @@ function initMap() {
 // More reliable on OxygenOS which throttles watchPosition callbacks
 let gpsWatchId     = null;  // polling interval reference
 let gpsInitialised = false;
-let lastAccuracy   = null;
+let lastAccuracy   = Infinity; // Infinity so first fix always triggers re-centre
 let accuracyCircle = null;
 let gpsPollActive  = false;
+let trafficFetched = false;   // prevent multiple fetchTrafficOnly calls on init
 
 function locateAndFetch() {
   if (!navigator.geolocation) {
     alert('Geolocation not supported.');
     return;
   }
-  if (!gpsInitialised) {
-    setPill('pill-gps', 'active', 'LOCATING…');
-    showLoader(true);
-  }
+  setPill('pill-gps', 'active', 'LOCATING…');
+  showLoader(true);
+  trafficFetched = false;
   startGpsPolling();
 }
 
@@ -1723,7 +1723,7 @@ function startGpsPolling() {
     onGpsError,
     {
       enableHighAccuracy: true,
-      maximumAge: 3000,  // reuse cached fix if <3s old (battery saving when idle)
+      maximumAge: 1000,  // accept fix up to 1s old for quick first response
       timeout: 30000,    // watchPosition manages its own retries — long timeout is fine
     }
   );
@@ -1732,10 +1732,12 @@ function startGpsPolling() {
 function stopGpsPolling() {
   gpsPollActive = false;
   if (gpsWatchId !== null) {
-    navigator.geolocation.clearWatch(gpsWatchId); // not clearInterval
+    navigator.geolocation.clearWatch(gpsWatchId);
     gpsWatchId = null;
   }
   gpsInitialised = false;
+  lastAccuracy = Infinity;
+  trafficFetched = false;
   if (accuracyCircle) { map.removeLayer(accuracyCircle); accuracyCircle = null; }
 }
 
@@ -1748,8 +1750,7 @@ function onGpsUpdate(pos) {
   var acc = Math.round(pos.coords.accuracy);
   dbg("GPS fix: " + lat.toFixed(5) + "," + lng.toFixed(5) + " acc:" + acc + "m");
 
-  // Always update internal position — even coarse fixes are useful for nav
-  lastAccuracy = acc;
+  // Always update internal position
   userLat = lat;
   userLng = lng;
 
@@ -1760,16 +1761,26 @@ function onGpsUpdate(pos) {
   placeGpsMarker(lat, lng);
   updateAccuracyCircle(lat, lng, acc);
 
-  if (!gpsInitialised) {
-    // First fix — centre the map and kick off traffic fetch
-    gpsInitialised = true;
-    map.setView([lat, lng], 15);
-    showLoader(false);
-    fetchTrafficOnly();
-  } else if (!navActive && acc < (lastAccuracy || 9999)) {
-    // Accuracy improved while idle — silently re-centre map
-    map.setView([lat, lng], map.getZoom());
+  // Re-centre map whenever accuracy improves (cell→WiFi→GPS progression)
+  // Compare BEFORE updating lastAccuracy so the comparison is valid
+  if (!navActive && acc < lastAccuracy) {
+    map.setView([lat, lng], gpsInitialised ? map.getZoom() : 15);
   }
+
+  // First fix: hide loader
+  if (!gpsInitialised) {
+    gpsInitialised = true;
+    showLoader(false);
+  }
+
+  // Trigger traffic fetch once accuracy is usable (<500m) — not on ±2000m cell fix
+  if (!trafficFetched && acc < 500) {
+    trafficFetched = true;
+    fetchTrafficOnly();
+  }
+
+  // Update lastAccuracy AFTER comparisons above
+  lastAccuracy = acc;
 
   if (navActive) {
     onNavPosition(pos);
@@ -2381,7 +2392,7 @@ let navPolyline     = null; // remaining route line
 let allRouteCoords  = [];   // full route coords
 let wakeLock        = null;
 let offRouteCount        = 0;
-let autoRerouteInProgress = false;  // prevents reroute spam
+let autoRerouteInProgress = false;
 let routeTotalTimeSecs = 0;
 let routeTotalDistance = 0;
 let trafficSegments    = []; // for coloured route (#5)
@@ -2567,20 +2578,14 @@ function stopNavigation() {
 }
 
 // ── AUTO REROUTE FROM CURRENT GPS ────────────────────────
-// Called when off-route is confirmed. Silently recalculates route
-// from the driver's real GPS position to the same destination.
 async function autoRerouteFromGps(lat, lng) {
   if (autoRerouteInProgress) return;
   if (!destLat || !destLng) return;
   autoRerouteInProgress = true;
-
   dbg('Auto-reroute from ' + lat.toFixed(5) + ',' + lng.toFixed(5));
   speak('Recalculating');
-
-  // Update origin to current GPS position
   originLat = lat;
   originLng = lng;
-
   try {
     const CHAFF_COUNT = 4;
     const chaffPoints = generateChaffPoints(CHAFF_COUNT);
@@ -2588,9 +2593,7 @@ async function autoRerouteFromGps(lat, lng) {
       fetchRealRoute(GH_KEY),
       ...chaffPoints.map(p => fireChaffQuery(GH_KEY, p.oLat, p.oLng, p.dLat, p.dLng)),
     ]);
-
     if (realResult && navActive) {
-      // Update route data and re-extract steps without stopping navigation
       currentRouteData = realResult;
       var ghCoords = realResult.paths[0].points.coordinates;
       allRouteCoords = ghCoords.map(function(c) { return [c[1], c[0]]; });
@@ -2598,24 +2601,19 @@ async function autoRerouteFromGps(lat, lng) {
       navCurrentStep = 0;
       offRouteCount = 0;
       lastAnnounceStep = -1;
-
-      // Redraw route on map
       if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
       if (routeSegLayers) { routeSegLayers.forEach(function(l){ map.removeLayer(l); }); routeSegLayers = []; }
       routeLayer = L.polyline(allRouteCoords, {
-        color: '#4f8ef7', weight: 5, opacity: 0.85,
-        lineJoin: 'round', lineCap: 'round',
+        color: '#4f8ef7', weight: 5, opacity: 0.85, lineJoin: 'round', lineCap: 'round',
       }).addTo(map);
-
       document.getElementById('offroute-banner').style.display = 'none';
       speak('Route updated');
-      dbg('Auto-reroute success: ' + navSteps.length + ' steps');
+      dbg('Auto-reroute OK: ' + navSteps.length + ' steps');
     }
   } catch(e) {
     dbg('Auto-reroute failed: ' + e.message);
     speak('Could not recalculate route');
   } finally {
-    // Cooldown: don't reroute again for 15 seconds
     setTimeout(function() { autoRerouteInProgress = false; }, 15000);
   }
 }
@@ -2644,9 +2642,8 @@ function onNavPosition(pos) {
   if (distToRoute > OFF_ROUTE_THRESHOLD) {
     offRouteCount++;
     if (offRouteCount >= OFF_ROUTE_STRIKES) {
-      // Show banner immediately
       document.getElementById('offroute-banner').style.display = 'block';
-      // Auto-reroute from current GPS position if accuracy is reasonable
+      // Auto-reroute from real GPS position if accuracy is good enough
       if (!autoRerouteInProgress && lastAccuracy < 80) {
         autoRerouteFromGps(lat, lng);
       }
