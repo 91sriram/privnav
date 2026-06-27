@@ -1,8 +1,8 @@
 {
-  "name": "PrivNav",
-  "short_name": "PrivNav",
-  "description": "Privacy-respecting traffic and navigation overlay",
-  "start_url": "/",
+  "name": "PrivNav MapLibre Fork",
+  "short_name": "PrivNav ML",
+  "description": "Experimental MapLibre fork of PrivNav",
+  "start_url": "./index.html",
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#0d0f14",

@@ -1,14 +1,25 @@
-// Force uninstall old service worker and stop caching
-self.addEventListener('install', function(e) {
+const CACHE_NAME = 'privnav-maplibre-fork-v1';
+
+self.addEventListener('install', function(event) {
   self.skipWaiting();
+  event.waitUntil(
+    caches.open(CACHE_NAME).then(function(cache) {
+      return cache.addAll([
+        './',
+        './index.html',
+        './manifest.json',
+        './icon-192.png',
+        './icon-512.png'
+      ]);
+    })
+  );
 });
 
-self.addEventListener('activate', function(e) {
-  e.waitUntil(
+self.addEventListener('activate', function(event) {
+  event.waitUntil(
     caches.keys().then(function(keys) {
-      return Promise.all(keys.map(function(k) {
-        console.log('Deleting cache:', k);
-        return caches.delete(k);
+      return Promise.all(keys.map(function(key) {
+        if (key !== CACHE_NAME) return caches.delete(key);
       }));
     }).then(function() {
       return self.clients.claim();
@@ -16,7 +27,11 @@ self.addEventListener('activate', function(e) {
   );
 });
 
-// Pass everything through to network — no caching
-self.addEventListener('fetch', function(e) {
-  e.respondWith(fetch(e.request));
+self.addEventListener('fetch', function(event) {
+  if (event.request.method !== 'GET') return;
+  event.respondWith(
+    fetch(event.request).catch(function() {
+      return caches.match(event.request);
+    })
+  );
 });

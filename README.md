@@ -1,9 +1,16 @@
-# PrivNav — Privacy-respecting navigation
+# PrivNav MapLibre Fork
 
-A self-contained navigation PWA using TomTom traffic data and OpenStreetMap.
+Experimental fork of the working PrivNav app. The original Leaflet build is untouched.
 
-## Privacy design
-- Traffic tiles queried by bounding box only — no route transmitted
-- Routing queries padded with chaff decoys
-- No analytics, no tracking, no ads
-- API key stored locally in browser only
+This version keeps the same service roles:
+- OSM-based rendering via OpenFreeMap/MapLibre style
+- GraphHopper routing
+- TomTom traffic raster overlay and incidents
+- Nominatim search
+
+The main experiment is native MapLibre camera control for navigation:
+- `bearing` rotates the map without CSS transforms
+- `pitch` gives a driving-view camera
+- route, traffic, markers, and hit-testing remain in the map engine's coordinate system
+
+Run it through a local/static server or GitHub Pages. Geolocation requires HTTPS or localhost.
