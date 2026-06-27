@@ -10,7 +10,7 @@
 <meta name="theme-color" content="#0d0f14">
 <link rel="apple-touch-icon" href="icon-192.png">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>PrivNav v12 — Traffic Overlay</title>
+<title>PrivNav v13 — Traffic Overlay</title>
 
 <style>/* required styles */
 
@@ -1329,6 +1329,24 @@ svg.leaflet-image-layer.leaflet-interactive path {
   #north-pill.active { display: block; }
 
 
+
+  #debug-panel {
+    display: none;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: rgba(0,0,0,0.9);
+    color: #2ecc71;
+    font-family: monospace;
+    font-size: 11px;
+    padding: 8px;
+    z-index: 9999;
+    max-height: 150px;
+    overflow-y: auto;
+  }
+  #debug-panel.show { display: block; }
+
   /* LEAFLET OVERRIDES */
   .leaflet-control-zoom {
     border: 1px solid var(--border) !important;
@@ -1692,6 +1710,7 @@ function locateAndFetch() {
 }
 
 function startGpsPolling() {
+  dbg("startGpsPolling called, active=" + gpsPollActive);
   if (gpsPollActive) return;
   gpsPollActive = true;
   pollGpsOnce(); // immediate first call
@@ -1699,6 +1718,7 @@ function startGpsPolling() {
 }
 
 function pollGpsOnce() {
+  dbg("GPS poll fired");
   navigator.geolocation.getCurrentPosition(
     onGpsUpdate,
     onGpsError,
@@ -1725,6 +1745,7 @@ function stopGpsWatch() { stopGpsPolling(); }
 
 function onGpsUpdate(pos) {
   var lat = pos.coords.latitude;
+  dbg("GPS fix: " + lat.toFixed(5) + "," + pos.coords.longitude.toFixed(5) + " acc:" + Math.round(pos.coords.accuracy) + "m");
   var lng = pos.coords.longitude;
   var acc = Math.round(pos.coords.accuracy);
 
@@ -1752,6 +1773,7 @@ function onGpsUpdate(pos) {
 }
 
 function onGpsError(err) {
+  dbg("GPS error code:" + err.code + " " + err.message);
   showLoader(false);
   if (err.code === err.TIMEOUT) {
     setPill('pill-gps', 'warn', 'WEAK SIGNAL');
@@ -3320,6 +3342,20 @@ function clearDestState() {
   var dr = document.getElementById('dest-results');
   if (dr) { dr.style.display = 'none'; dr.innerHTML = ''; }
   clearRoute();
+}
+
+
+// ── DEBUG PANEL ──────────────────────────────────────────
+var debugLines = [];
+function dbg(msg) {
+  var t = new Date().toLocaleTimeString();
+  debugLines.unshift('[' + t + '] ' + msg);
+  if (debugLines.length > 20) debugLines.pop();
+  var el = document.getElementById('debug-panel');
+  if (el) {
+    el.classList.add('show');
+    el.innerHTML = debugLines.join('<br>');
+  }
 }
 
 // ── BOOT ─────────────────────────────────────────────────
