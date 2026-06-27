@@ -10,7 +10,7 @@
 <meta name="theme-color" content="#0d0f14">
 <link rel="apple-touch-icon" href="icon-192.png">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>PrivNav v11 — Traffic Overlay</title>
+<title>PrivNav v12 — Traffic Overlay</title>
 
 <style>/* required styles */
 
@@ -1670,58 +1670,75 @@ function initMap() {
 }
 
 // ── GPS ─────────────────────────────────────────────────
-// ── CONTINUOUS GPS TRACKING ──────────────────────────────
-let gpsWatchId      = null;   // persistent watch outside navigation
-let lastAccuracy    = null;   // metres
-let gpsInitialised  = false;  // first fix received
+// ── GPS POLLING SYSTEM ───────────────────────────────────
+// Uses repeated getCurrentPosition instead of watchPosition
+// More reliable on OxygenOS which throttles watchPosition callbacks
+let gpsWatchId     = null;  // polling interval reference
+let gpsInitialised = false;
+let lastAccuracy   = null;
+let accuracyCircle = null;
+let gpsPollActive  = false;
 
 function locateAndFetch() {
   if (!navigator.geolocation) {
-    alert('Geolocation not supported by this browser.');
+    alert('Geolocation not supported.');
     return;
   }
-
-  // If already watching, just fetch traffic with current position
-  if (gpsWatchId !== null && userLat !== null) {
-    fetchTrafficOnly();
-    return;
+  if (!gpsInitialised) {
+    setPill('pill-gps', 'active', 'LOCATING…');
+    showLoader(true);
   }
+  startGpsPolling();
+}
 
-  setPill('pill-gps', 'active', 'LOCATING…');
-  showLoader(true);
+function startGpsPolling() {
+  if (gpsPollActive) return;
+  gpsPollActive = true;
+  pollGpsOnce(); // immediate first call
+  gpsWatchId = setInterval(pollGpsOnce, 3000); // then every 3 seconds
+}
 
-  // Start continuous watch — maximumAge:0 forces fresh hardware reading
-  gpsWatchId = navigator.geolocation.watchPosition(
+function pollGpsOnce() {
+  navigator.geolocation.getCurrentPosition(
     onGpsUpdate,
     onGpsError,
     {
       enableHighAccuracy: true,
-      maximumAge: 0,        // never use cached position
-      timeout: 30000,       // 30s to get a fix
+      maximumAge: 0,
+      timeout: 10000,
     }
   );
 }
 
+function stopGpsPolling() {
+  gpsPollActive = false;
+  if (gpsWatchId !== null) {
+    clearInterval(gpsWatchId);
+    gpsWatchId = null;
+  }
+  gpsInitialised = false;
+  if (accuracyCircle) { map.removeLayer(accuracyCircle); accuracyCircle = null; }
+}
+
+// alias for stopNavigation compatibility
+function stopGpsWatch() { stopGpsPolling(); }
+
 function onGpsUpdate(pos) {
   var lat = pos.coords.latitude;
   var lng = pos.coords.longitude;
-  var acc = Math.round(pos.coords.accuracy); // metres
+  var acc = Math.round(pos.coords.accuracy);
 
   lastAccuracy = acc;
   userLat = lat;
   userLng = lng;
 
-  // Show accuracy in GPS pill
   var accStr = acc < 20 ? acc + 'm ✓' : acc < 100 ? acc + 'm' : acc + 'm ⚠';
   setPill('pill-gps', acc < 100 ? 'ok' : 'warn',
     lat.toFixed(4) + ', ' + lng.toFixed(4) + ' ±' + accStr);
 
   placeGpsMarker(lat, lng);
-
-  // Show accuracy circle on map
   updateAccuracyCircle(lat, lng, acc);
 
-  // On first fix — centre map and fetch traffic
   if (!gpsInitialised) {
     gpsInitialised = true;
     map.setView([lat, lng], 15);
@@ -1729,7 +1746,6 @@ function onGpsUpdate(pos) {
     fetchTrafficOnly();
   }
 
-  // If navigating, update nav position
   if (navActive) {
     onNavPosition(pos);
   }
@@ -1741,20 +1757,15 @@ function onGpsError(err) {
     setPill('pill-gps', 'warn', 'WEAK SIGNAL');
   } else if (err.code === err.PERMISSION_DENIED) {
     setPill('pill-gps', 'err', 'DENIED');
-    gpsWatchId = null;
-  } else {
-    setPill('pill-gps', 'warn', 'GPS ERROR');
+    stopGpsPolling();
   }
 }
 
-// Accuracy circle on map
-let accuracyCircle = null;
-function updateAccuracyCircle(lat, lng, accuracyMetres) {
+function updateAccuracyCircle(lat, lng, acc) {
   if (accuracyCircle) map.removeLayer(accuracyCircle);
-  // Only show circle if accuracy is poor (>50m)
-  if (accuracyMetres > 50) {
+  if (acc > 50) {
     accuracyCircle = L.circle([lat, lng], {
-      radius: accuracyMetres,
+      radius: acc,
       color: '#4f8ef7',
       fillColor: '#4f8ef7',
       fillOpacity: 0.08,
@@ -1762,15 +1773,6 @@ function updateAccuracyCircle(lat, lng, accuracyMetres) {
       opacity: 0.4,
     }).addTo(map);
   }
-}
-
-function stopGpsWatch() {
-  if (gpsWatchId !== null) {
-    navigator.geolocation.clearWatch(gpsWatchId);
-    gpsWatchId = null;
-  }
-  gpsInitialised = false;
-  if (accuracyCircle) { map.removeLayer(accuracyCircle); accuracyCircle = null; }
 }
 
 function placeGpsMarker(lat, lng) {
@@ -2489,16 +2491,14 @@ async function startNavigation() {
   updateHUD(0, 0);
   speak(navSteps[0] ? navSteps[0].instruction : 'Starting navigation');
 
-  // GPS already watching continuously — nav uses the same stream
-  // onGpsUpdate calls onNavPosition when navActive is true
-  navWatchId = gpsWatchId; // reference only, don't start a new watch
+  // GPS polling already running — nav piggybacks on same stream
+  navWatchId = gpsWatchId;
 }
 
 function stopNavigation() {
   navActive = false;
 
-  // Don't stop GPS watch — keep tracking continuously
-  navWatchId = null; // just clear the reference
+  navWatchId = null; // GPS polling continues after nav stops
 
   if (wakeLock) { wakeLock.release(); wakeLock = null; }
 
