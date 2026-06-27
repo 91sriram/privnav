@@ -7,7 +7,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="icon-192.png">
-<title>PrivNav MapLibre Fork</title>
+<title>PrivNav</title>
 <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@latest/dist/maplibre-gl.css">
 <script src="https://unpkg.com/maplibre-gl@latest/dist/maplibre-gl.js"></script>
 <style>
@@ -27,6 +27,48 @@
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--text); font-family: var(--font); }
+
+  /* ── Splash ──────────────────────────────────────── */
+  #splash {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    background: var(--bg);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    transition: opacity 0.45s ease;
+  }
+  #splash.fade-out { opacity: 0; pointer-events: none; }
+  #splash-icon { margin-bottom: 14px; }
+  #splash-title {
+    font-size: 46px;
+    font-weight: 900;
+    letter-spacing: -2px;
+    color: var(--text);
+  }
+  #splash-sub {
+    margin-top: 10px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    min-height: 16px;
+  }
+  #splash-ring {
+    width: 60px;
+    height: 60px;
+    border: 3px solid rgba(79,142,247,0.2);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    margin: 0 auto 18px;
+    display: none;
+  }
+  #splash.loading #splash-ring { display: block; animation: spin 1s linear infinite; }
+  #splash.loading #splash-icon { display: none; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── App shell ───────────────────────────────────── */
   #app { height: 100%; display: flex; flex-direction: column; }
   #topbar {
     height: 54px;
@@ -37,8 +79,9 @@
     background: rgba(13,15,20,0.96);
     border-bottom: 1px solid var(--border);
     z-index: 5;
+    overflow: hidden;
   }
-  #brand { font-weight: 800; letter-spacing: 0; white-space: nowrap; }
+  #brand { font-weight: 900; letter-spacing: -0.5px; white-space: nowrap; font-size: 15px; }
   .pill {
     display: inline-flex;
     align-items: center;
@@ -52,12 +95,17 @@
     font-size: 11px;
     white-space: nowrap;
   }
-  .pill.ok { color: var(--free); border-color: rgba(46,204,113,0.5); }
+  .pill.ok  { color: var(--free); border-color: rgba(46,204,113,0.5); }
   .pill.warn { color: var(--slow); border-color: rgba(241,196,15,0.5); }
-  .pill.err { color: var(--jam); border-color: rgba(231,76,60,0.5); }
+  .pill.err  { color: var(--jam);  border-color: rgba(231,76,60,0.5); }
   .pill.active { color: var(--accent); border-color: rgba(79,142,247,0.5); }
+  #pill-voice { cursor: pointer; user-select: none; }
+
+  /* ── Map area ────────────────────────────────────── */
   #map-wrap { flex: 1; position: relative; min-height: 0; }
   #map { position: absolute; inset: 0; }
+
+  /* ── Panel ───────────────────────────────────────── */
   #panel {
     position: absolute;
     top: 12px;
@@ -75,27 +123,22 @@
     overflow: auto;
     box-shadow: 0 12px 32px rgba(0,0,0,0.38);
   }
-  /* FIX 2: Minimize button row — always visible at top of panel */
   #panel-min-row {
     display: flex;
     justify-content: flex-end;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     flex-shrink: 0;
   }
-  #panel-min-label {
-    font-size: 10px;
-    font-family: var(--mono);
-    color: var(--muted);
-    display: none;
-  }
+  #panel-min-label { font-size: 10px; font-family: var(--mono); color: var(--muted); display: none; margin-right: auto; }
   #panel.minimized #panel-min-label { display: block; }
-  /* FIX 2: Collapse everything inside panel-body when minimized */
   #panel.minimized #panel-body { display: none; }
-  #panel.minimized { gap: 0; padding: 6px 8px; overflow: visible; }
-  .row { display: flex; gap: 8px; align-items: center; }
+  #panel.minimized { gap: 0; padding: 6px 8px; }
+
+  .row   { display: flex; gap: 8px; align-items: center; }
   .stack { display: flex; flex-direction: column; gap: 6px; }
-  label { font-size: 10px; color: var(--muted); font-family: var(--mono); }
+  label  { font-size: 10px; color: var(--muted); font-family: var(--mono); }
+
   input {
     width: 100%;
     min-height: 38px;
@@ -117,8 +160,27 @@
     cursor: pointer;
   }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  button.danger { background: var(--jam); border-color: var(--jam); color: #fff; }
-  button.icon { width: 42px; flex: 0 0 42px; font-size: 18px; }
+  button.danger  { background: var(--jam);    border-color: var(--jam);    color: #fff; }
+  button.icon    { width: 42px; flex: 0 0 42px; font-size: 18px; display: flex; align-items: center; justify-content: center; }
+
+  /* GPS origin button */
+  #origin-gps { color: var(--muted); transition: color 0.2s, border-color 0.2s; }
+  #origin-gps.active { color: var(--accent); border-color: rgba(79,142,247,0.6); animation: gps-pulse 1s ease-in-out infinite; }
+  @keyframes gps-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }
+
+  /* 3D button (inside panel header) */
+  #btn-3d {
+    font-size: 10px;
+    font-family: var(--mono);
+    font-weight: 700;
+    padding: 4px 8px;
+    min-height: unset;
+    height: 28px;
+    border-radius: 5px;
+    color: var(--muted);
+  }
+  #btn-3d.active { color: var(--accent); border-color: rgba(79,142,247,0.5); }
+
   .results {
     display: none;
     border: 1px solid var(--border);
@@ -126,14 +188,12 @@
     overflow: hidden;
     background: #10141c;
   }
-  .result {
-    padding: 8px 10px;
-    border-bottom: 1px solid var(--border);
-    cursor: pointer;
-  }
+  .result { padding: 8px 10px; border-bottom: 1px solid var(--border); cursor: pointer; }
   .result:last-child { border-bottom: 0; }
   .result-name { font-size: 13px; font-weight: 700; }
   .result-addr { margin-top: 2px; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* ── Nav HUD ─────────────────────────────────────── */
   #nav-hud {
     display: none;
     position: absolute;
@@ -151,25 +211,16 @@
     box-shadow: 0 12px 32px rgba(0,0,0,0.38);
     overflow: hidden;
   }
-  #maneuver {
-    display: flex;
-    gap: 12px;
-    align-items: center;
-    padding: 14px;
-    background: var(--accent);
-  }
-  #nav-arrow { font-size: 42px; line-height: 1; }
+  #maneuver { display: flex; gap: 12px; align-items: center; padding: 14px; background: var(--accent); }
+  #nav-arrow    { font-size: 42px; line-height: 1; }
   #nav-instruction { font-size: 16px; font-weight: 800; line-height: 1.25; }
-  #nav-distance { margin-top: 2px; font-family: var(--mono); font-size: 14px; opacity: 0.9; }
-  #nav-meta {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 1px;
-    background: var(--border);
-  }
+  #nav-distance    { margin-top: 2px; font-family: var(--mono); font-size: 14px; opacity: 0.9; }
+  #nav-meta { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--border); }
   .meta { padding: 8px; background: var(--surface); text-align: center; }
   .meta strong { display: block; font-family: var(--mono); font-size: 14px; }
-  .meta span { display: block; margin-top: 2px; color: var(--muted); font-size: 9px; font-family: var(--mono); }
+  .meta span   { display: block; margin-top: 2px; color: var(--muted); font-size: 9px; font-family: var(--mono); }
+
+  /* ── Recentre button ─────────────────────────────── */
   #recentre {
     position: absolute;
     right: 14px;
@@ -187,17 +238,17 @@
     border-color: var(--accent);
   }
   #recentre.visible { display: flex; }
+
+  /* ── Markers ─────────────────────────────────────── */
   .gps-dot {
-    width: 18px;
-    height: 18px;
+    width: 18px; height: 18px;
     border-radius: 50%;
     background: var(--accent);
     border: 3px solid #fff;
     box-shadow: 0 0 0 4px rgba(79,142,247,0.35);
   }
   .pin {
-    width: 22px;
-    height: 22px;
+    width: 22px; height: 22px;
     border-radius: 50% 50% 50% 4px;
     transform: rotate(-45deg);
     border: 2px solid #fff;
@@ -208,40 +259,50 @@
   }
   .pin span { transform: rotate(45deg); }
   .incident-marker { font-size: 22px; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5)); }
-  #toast {
+
+  /* ── Route preview sheet ─────────────────────────── */
+  #route-preview {
     position: absolute;
-    left: 50%;
-    bottom: 18px;
-    transform: translateX(-50%);
-    z-index: 5;
-    display: none;
-    max-width: calc(100vw - 24px);
-    padding: 9px 12px;
-    background: rgba(21,24,32,0.98);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    color: var(--text);
-    font-size: 12px;
-    box-shadow: 0 10px 26px rgba(0,0,0,0.4);
+    left: 0; right: 0; bottom: 0;
+    z-index: 8;
+    background: rgba(17,20,28,0.98);
+    border-top: 1px solid var(--border);
+    border-radius: 18px 18px 0 0;
+    padding: 18px 16px 32px;
+    box-shadow: 0 -10px 40px rgba(0,0,0,0.5);
+    transform: translateY(100%);
+    transition: transform 0.32s cubic-bezier(0.4,0,0.2,1);
+    pointer-events: none;
   }
-  #debug {
-    display: none;
-    position: absolute;
-    left: 12px;
-    bottom: 12px;
-    z-index: 3;
-    max-width: min(420px, calc(100vw - 24px));
-    max-height: 160px;
-    overflow: auto;
-    padding: 8px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: rgba(15,18,25,0.92);
-    color: var(--muted);
+  #route-preview.visible { transform: translateY(0); pointer-events: auto; }
+  #rp-handle {
+    width: 38px; height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    margin: 0 auto 14px;
+  }
+  #rp-header {
+    font-size: 11px;
     font-family: var(--mono);
-    font-size: 10px;
+    color: var(--muted);
+    text-align: center;
+    margin-bottom: 12px;
+    letter-spacing: 0.08em;
   }
-  /* FIX 1: Floating stop-navigation button — visible on all screen sizes during nav */
+  #rp-stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    margin-bottom: 14px;
+  }
+  #rp-stats .meta { background: var(--surface); }
+  #rp-stats .meta strong { font-size: 18px; }
+  #rp-stats .meta span  { font-size: 9px; }
+
+  /* ── Float stop button ───────────────────────────── */
   #nav-stop-float {
     display: none;
     position: absolute;
@@ -261,31 +322,79 @@
     white-space: nowrap;
   }
   #nav-stop-float.visible { display: block; }
-  /* On wide screens keep the in-panel Stop button as primary; hide the float duplicate */
-  @media (min-width: 721px) {
-    #nav-stop-float { display: none !important; }
+  @media (min-width: 721px) { #nav-stop-float { display: none !important; } }
+
+  /* ── Toast / Debug ───────────────────────────────── */
+  #toast {
+    position: absolute;
+    left: 50%; bottom: 18px;
+    transform: translateX(-50%);
+    z-index: 5;
+    display: none;
+    max-width: calc(100vw - 24px);
+    padding: 9px 12px;
+    background: rgba(21,24,32,0.98);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 12px;
+    box-shadow: 0 10px 26px rgba(0,0,0,0.4);
   }
-  #pill-voice { cursor: pointer; user-select: none; }
+  #debug {
+    display: none;
+    position: absolute;
+    left: 12px; bottom: 12px;
+    z-index: 3;
+    max-width: min(420px, calc(100vw - 24px));
+    max-height: 160px;
+    overflow: auto;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: rgba(15,18,25,0.92);
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 10px;
+  }
+
+  /* ── Mobile ──────────────────────────────────────── */
   @media (max-width: 720px) {
     #topbar { gap: 6px; }
-    #brand { font-size: 14px; }
-    .pill { font-size: 10px; padding-inline: 6px; }
-    #panel { top: auto; right: 8px; left: 8px; bottom: 8px; width: auto; max-height: 42%; }
+    #brand  { font-size: 13px; }
+    .pill   { font-size: 10px; padding-inline: 6px; }
+    #panel  { top: auto; right: 8px; left: 8px; bottom: 8px; width: auto; max-height: 44%; }
     #panel.nav-mode { display: none; }
+    #route-preview { border-radius: 14px 14px 0 0; }
   }
 </style>
 </head>
 <body>
+
+<!-- ── Splash screen ──────────────────────────────── -->
+<div id="splash" class="loading">
+  <div id="splash-ring"></div>
+  <div id="splash-icon">
+    <svg viewBox="0 0 24 24" width="56" height="56" fill="none" stroke="#4f8ef7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <polygon points="12,2 19,21 12,17 5,21"/>
+    </svg>
+  </div>
+  <div id="splash-title">PrivNav</div>
+  <div id="splash-sub">Loading map...</div>
+</div>
+
 <div id="app">
   <div id="topbar">
-    <div id="brand">PrivNav ML</div>
+    <div id="brand">PrivNav</div>
     <div id="pill-gps" class="pill">NO GPS</div>
     <div id="pill-traffic" class="pill">TRAFFIC IDLE</div>
     <div id="pill-camera" class="pill">NORTH-UP</div>
     <div id="pill-voice" class="pill ok" title="Toggle voice">VOICE</div>
   </div>
+
   <div id="map-wrap">
     <div id="map"></div>
+
+    <!-- Nav HUD -->
     <div id="nav-hud">
       <div class="hud-card">
         <div id="maneuver">
@@ -302,40 +411,66 @@
         </div>
       </div>
     </div>
+
     <button id="recentre" title="Recenter">◎</button>
-    <!-- FIX 1: Floating stop button shown on mobile during navigation -->
-    <button id="nav-stop-float">Stop Navigation</button>
+
+    <!-- Float stop button (mobile only) -->
+    <button id="nav-stop-float">End Navigation</button>
+
+    <!-- Route preview sheet -->
+    <div id="route-preview">
+      <div id="rp-handle"></div>
+      <div id="rp-header">ROUTE PREVIEW</div>
+      <div id="rp-stats">
+        <div class="meta"><strong id="rp-dist">--</strong><span>DISTANCE</span></div>
+        <div class="meta"><strong id="rp-time">--</strong><span>DURATION</span></div>
+        <div class="meta"><strong id="rp-eta">--:--</strong><span>ETA</span></div>
+      </div>
+      <div class="row">
+        <button id="rp-cancel" style="flex:1">Cancel</button>
+        <button id="rp-start" class="primary" style="flex:2">Start Navigation</button>
+      </div>
+    </div>
+
+    <!-- Side panel -->
     <div id="panel">
-      <!-- FIX 2: Minimize row — always rendered, collapses panel-body on click -->
       <div id="panel-min-row">
         <span id="panel-min-label">MENU</span>
+        <button id="btn-3d" title="Toggle 3D view">3D</button>
         <button class="icon" id="panel-toggle" title="Minimize panel">−</button>
       </div>
       <div id="panel-body">
         <div class="stack">
           <label>Origin</label>
           <div class="row">
-            <input id="origin-input" placeholder="Search origin, or use GPS" autocomplete="off">
-            <button class="icon" id="origin-gps" title="Use GPS">◎</button>
+            <input id="origin-input" placeholder="Search or use GPS" autocomplete="off">
+            <button class="icon" id="origin-gps" title="Get GPS location">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+                <circle cx="12" cy="12" r="4"/>
+                <line x1="12" y1="2" x2="12" y2="7"/>
+                <line x1="12" y1="17" x2="12" y2="22"/>
+                <line x1="2"  y1="12" x2="7"  y2="12"/>
+                <line x1="17" y1="12" x2="22" y2="12"/>
+              </svg>
+            </button>
           </div>
           <div id="origin-results" class="results"></div>
         </div>
         <div class="stack">
-          <label>Destination</label>
+          <label>Where to?</label>
           <input id="dest-input" placeholder="Search destination" autocomplete="off">
           <div id="dest-results" class="results"></div>
         </div>
         <div class="row">
-          <button id="locate-btn">Locate</button>
-          <button id="route-btn" class="primary">Route</button>
-          <button id="nav-btn" class="primary">Navigate</button>
+          <button id="route-btn" class="primary" style="flex:1">Route</button>
+          <button id="nav-btn"   class="primary" style="flex:1">Navigate</button>
         </div>
-        <div class="row">
-          <button id="traffic-btn">Refresh Traffic</button>
-          <button id="debug-btn">Debug</button>
-        </div>
+        <!-- Hidden — kept so existing JS references don't throw -->
+        <button id="traffic-btn" style="display:none">Refresh Traffic</button>
+        <button id="debug-btn"   style="display:none">Debug</button>
       </div>
     </div>
+
     <div id="toast"></div>
     <div id="debug"></div>
   </div>
@@ -351,6 +486,7 @@ const OFF_ROUTE_THRESHOLD = 65;
 const GPS_WATCH_OPTIONS = { enableHighAccuracy: true, maximumAge: 1000, timeout: 20000 };
 const GPS_POLL_MS = 3000;
 const GPS_TIMEOUT_MS = 12000;
+const TRAFFIC_REFRESH_MS = 3 * 60 * 1000;
 
 let map;
 let gpsMarker = null;
@@ -381,10 +517,10 @@ let wakeLock = null;
 let routeTotalDistance = 0;
 let routeTotalTimeSecs = 0;
 let debugLines = [];
-// FIX 3: flag set by explicit user actions so the next GPS fix flies the map
 let pendingFlyToGps = false;
+let is3D = false;
 
-// Voice / TTS state
+// Voice state
 let voiceMuted = false;
 let lastSpokenStep = -1;
 let voiceThresholdsFired = {};
@@ -413,14 +549,32 @@ function dbg(msg) {
   $('debug').innerHTML = debugLines.join('<br>');
 }
 
-function toLngLat(latLng) {
-  return [latLng[1], latLng[0]];
+function toLngLat(latLng) { return [latLng[1], latLng[0]]; }
+function toLatLng(lngLat) { return [lngLat[1], lngLat[0]]; }
+
+/* ── Splash ────────────────────────────────────────── */
+function showSplash(subtitle, duration, onDone) {
+  const el = $('splash');
+  $('splash-sub').textContent = subtitle || '';
+  el.classList.remove('fade-out', 'loading');
+  el.style.display = 'flex';
+  void el.offsetHeight; // force reflow so transition restarts
+  setTimeout(function() {
+    el.classList.add('fade-out');
+    setTimeout(function() {
+      el.style.display = 'none';
+      if (onDone) onDone();
+    }, 450);
+  }, duration || 1400);
 }
 
-function toLatLng(lngLat) {
-  return [lngLat[1], lngLat[0]];
+function flyToGpsWithSplash(lat, lng) {
+  showSplash('', 1100, function() {
+    map.easeTo({ center: [lng, lat], zoom: 16, duration: 800 });
+  });
 }
 
+/* ── Voice / TTS ───────────────────────────────────── */
 function speak(text) {
   if (voiceMuted || !window.speechSynthesis) return;
   window.speechSynthesis.cancel();
@@ -431,12 +585,12 @@ function speak(text) {
   window.speechSynthesis.speak(utt);
 }
 
-// iOS Safari pauses speechSynthesis when the audio session is inactive; resume it periodically
 function startIosTtsKeepalive() {
   iosTtsTimer = setInterval(function() {
     if (window.speechSynthesis && window.speechSynthesis.paused) window.speechSynthesis.resume();
   }, 5000);
 }
+
 function stopIosTtsKeepalive() {
   clearInterval(iosTtsTimer);
   iosTtsTimer = null;
@@ -447,7 +601,6 @@ function announceNavUpdate(stepIdx, progress) {
   const step = navSteps[stepIdx];
   if (!step) return;
 
-  // When the step index changes, speak the new instruction immediately
   if (stepIdx !== lastSpokenStep) {
     lastSpokenStep = stepIdx;
     voiceThresholdsFired = {};
@@ -456,7 +609,6 @@ function announceNavUpdate(stepIdx, progress) {
     return;
   }
 
-  // Warn 500 m and 200 m before the next maneuver
   const next = navSteps[stepIdx + 1];
   if (!next) return;
   const distToNext = Math.max(0, next.distFromStart - progress);
@@ -469,6 +621,23 @@ function announceNavUpdate(stepIdx, progress) {
   });
 }
 
+/* ── Route preview sheet ───────────────────────────── */
+function showRoutePreview() {
+  $('rp-dist').textContent = formatDist(routeTotalDistance);
+  const mins = Math.round(routeTotalTimeSecs / 60);
+  $('rp-time').textContent = mins < 60
+    ? mins + ' min'
+    : Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm';
+  const eta = new Date(Date.now() + routeTotalTimeSecs * 1000);
+  $('rp-eta').textContent = eta.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  $('route-preview').classList.add('visible');
+}
+
+function hideRoutePreview() {
+  $('route-preview').classList.remove('visible');
+}
+
+/* ── Map init ──────────────────────────────────────── */
 function initMap() {
   map = new maplibregl.Map({
     container: 'map',
@@ -492,7 +661,14 @@ function initMap() {
     addTrafficLayer();
     addAccuracyLayer();
     initHandlers();
-    toast('MapLibre fork ready');
+
+    // Dismiss initial splash
+    $('splash').classList.add('fade-out');
+    setTimeout(function() { $('splash').style.display = 'none'; }, 450);
+
+    // Auto-refresh traffic (first hit after 8s, then every 3 min)
+    setTimeout(refreshTraffic, 8000);
+    setInterval(refreshTraffic, TRAFFIC_REFRESH_MS);
   });
 
   map.on('dragstart', function() {
@@ -515,121 +691,104 @@ function initMap() {
 
 function addRouteSources() {
   map.addSource('route', geojsonSource(lineFeature([])));
-  map.addLayer({
-    id: 'route-casing',
-    type: 'line',
-    source: 'route',
-    paint: { 'line-color': '#0b0d12', 'line-width': 9, 'line-opacity': 0.9 }
-  });
-  map.addLayer({
-    id: 'route-line',
-    type: 'line',
-    source: 'route',
-    paint: { 'line-color': '#4f8ef7', 'line-width': 5, 'line-opacity': 0.95 }
-  });
+  map.addLayer({ id: 'route-casing', type: 'line', source: 'route',
+    paint: { 'line-color': '#0b0d12', 'line-width': 9, 'line-opacity': 0.9 } });
+  map.addLayer({ id: 'route-line', type: 'line', source: 'route',
+    paint: { 'line-color': '#4f8ef7', 'line-width': 5, 'line-opacity': 0.95 } });
+
   map.addSource('remaining-route', geojsonSource(lineFeature([])));
-  map.addLayer({
-    id: 'remaining-route',
-    type: 'line',
-    source: 'remaining-route',
-    paint: { 'line-color': '#2ecc71', 'line-width': 7, 'line-opacity': 0.95 }
-  });
+  map.addLayer({ id: 'remaining-route', type: 'line', source: 'remaining-route',
+    paint: { 'line-color': '#2ecc71', 'line-width': 7, 'line-opacity': 0.95 } });
 }
 
 function addTrafficLayer() {
   map.addSource('tomtom-flow', {
     type: 'raster',
-    tiles: [
-      'https://api.tomtom.com/traffic/map/4/tile/flow/relative0/{z}/{x}/{y}.png?key=' + TT_KEY + '&tileSize=256'
-    ],
+    tiles: ['https://api.tomtom.com/traffic/map/4/tile/flow/relative0/{z}/{x}/{y}.png?key=' + TT_KEY + '&tileSize=256'],
     tileSize: 256
   });
-  map.addLayer({
-    id: 'tomtom-flow',
-    type: 'raster',
-    source: 'tomtom-flow',
-    paint: { 'raster-opacity': 0.72 }
-  });
+  map.addLayer({ id: 'tomtom-flow', type: 'raster', source: 'tomtom-flow',
+    paint: { 'raster-opacity': 0.72 } });
 }
 
 function addAccuracyLayer() {
   map.addSource('accuracy', geojsonSource(circleFeature(0, 0, 0)));
-  map.addLayer({
-    id: 'accuracy-fill',
-    type: 'fill',
-    source: 'accuracy',
-    paint: { 'fill-color': '#4f8ef7', 'fill-opacity': 0.12 }
-  });
-  map.addLayer({
-    id: 'accuracy-line',
-    type: 'line',
-    source: 'accuracy',
-    paint: { 'line-color': '#4f8ef7', 'line-width': 1, 'line-opacity': 0.45 }
-  });
+  map.addLayer({ id: 'accuracy-fill', type: 'fill', source: 'accuracy',
+    paint: { 'fill-color': '#4f8ef7', 'fill-opacity': 0.12 } });
+  map.addLayer({ id: 'accuracy-line', type: 'line', source: 'accuracy',
+    paint: { 'line-color': '#4f8ef7', 'line-width': 1, 'line-opacity': 0.45 } });
   accuracySourceReady = true;
 }
 
-function geojsonSource(data) {
-  return { type: 'geojson', data: data };
-}
+function geojsonSource(data) { return { type: 'geojson', data: data }; }
 
 function lineFeature(latLngs) {
-  return {
-    type: 'Feature',
-    properties: {},
-    geometry: {
-      type: 'LineString',
-      coordinates: latLngs.map(toLngLat)
-    }
-  };
+  return { type: 'Feature', properties: {},
+    geometry: { type: 'LineString', coordinates: latLngs.map(toLngLat) } };
 }
 
 function circleFeature(lat, lng, radiusMeters) {
-  if (!radiusMeters) {
-    return { type: 'FeatureCollection', features: [] };
-  }
-  const points = [];
-  const steps = 64;
+  if (!radiusMeters) return { type: 'FeatureCollection', features: [] };
+  const points = [], steps = 64;
   for (let i = 0; i <= steps; i++) {
     const a = i / steps * Math.PI * 2;
     const dLat = (radiusMeters / 111320) * Math.cos(a);
     const dLng = (radiusMeters / (111320 * Math.cos(lat * Math.PI / 180))) * Math.sin(a);
     points.push([lng + dLng, lat + dLat]);
   }
-  return {
-    type: 'Feature',
-    properties: {},
-    geometry: { type: 'Polygon', coordinates: [points] }
-  };
+  return { type: 'Feature', properties: {},
+    geometry: { type: 'Polygon', coordinates: [points] } };
 }
 
+/* ── Event handlers ────────────────────────────────── */
 function initHandlers() {
-  // FIX 3: set pendingFlyToGps before startGps so the first fix flies the map
-  $('locate-btn').addEventListener('click', function() {
-    pendingFlyToGps = true;
-    startGps();
-  });
   $('origin-gps').addEventListener('click', useGpsOrigin);
   $('route-btn').addEventListener('click', calculateRoute);
   $('nav-btn').addEventListener('click', toggleNavigation);
   $('traffic-btn').addEventListener('click', refreshTraffic);
   $('recentre').addEventListener('click', recentre);
-  $('debug-btn').addEventListener('click', function() {
-    $('debug').style.display = $('debug').style.display === 'block' ? 'none' : 'block';
+  $('nav-stop-float').addEventListener('click', stopNavigation);
+
+  // Route preview buttons
+  $('rp-start').addEventListener('click', function() {
+    hideRoutePreview();
+    startNavigation();
   });
-  // FIX 2: panel minimize toggle
+  $('rp-cancel').addEventListener('click', hideRoutePreview);
+
+  // Panel minimize
   $('panel-toggle').addEventListener('click', function() {
     const minimized = $('panel').classList.toggle('minimized');
     $('panel-toggle').textContent = minimized ? '+' : '−';
   });
-  // FIX 1: floating stop button wired to stopNavigation
-  $('nav-stop-float').addEventListener('click', stopNavigation);
+
+  // 3D toggle
+  $('btn-3d').addEventListener('click', function() {
+    if (navActive) return;
+    is3D = !is3D;
+    $('btn-3d').classList.toggle('active', is3D);
+    map.easeTo({ pitch: is3D ? 45 : 0, duration: 600 });
+    try {
+      map.getStyle().layers.forEach(function(layer) {
+        if (layer.type === 'fill-extrusion') {
+          map.setLayoutProperty(layer.id, 'visibility', is3D ? 'visible' : 'none');
+        }
+      });
+    } catch(e) {}
+  });
+
   // Voice mute toggle
   $('pill-voice').addEventListener('click', function() {
     voiceMuted = !voiceMuted;
     setPill('pill-voice', voiceMuted ? 'warn' : 'ok', voiceMuted ? 'MUTED' : 'VOICE');
     if (voiceMuted && window.speechSynthesis) window.speechSynthesis.cancel();
   });
+
+  // Debug toggle (button hidden but keyboard accessible for dev)
+  $('debug-btn').addEventListener('click', function() {
+    $('debug').style.display = $('debug').style.display === 'block' ? 'none' : 'block';
+  });
+
   bindSearch('origin');
   bindSearch('dest');
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function(){});
@@ -642,11 +801,7 @@ function bindSearch(kind) {
   input.addEventListener('input', function() {
     clearTimeout(timer);
     const q = input.value.trim();
-    if (q.length < 3) {
-      results.style.display = 'none';
-      results.innerHTML = '';
-      return;
-    }
+    if (q.length < 3) { results.style.display = 'none'; results.innerHTML = ''; return; }
     timer = setTimeout(function() {
       searchPlace(q, results, function(place) {
         const lat = parseFloat(place.lat);
@@ -669,7 +824,7 @@ async function searchPlace(query, resultsEl, onPick) {
   const url = 'https://nominatim.openstreetmap.org/search?q=' + encodeURIComponent(query) +
     '&format=json&limit=6&viewbox=79.8,12.3,80.5,13.5&bounded=0&countrycodes=in&addressdetails=1&accept-language=en';
   try {
-    const r = await fetch(url, { headers: { 'User-Agent': 'PrivNav-MapLibre/1.0' } });
+    const r = await fetch(url, { headers: { 'User-Agent': 'PrivNav/2.0' } });
     const data = await r.json();
     resultsEl.innerHTML = '';
     if (!data.length) {
@@ -691,9 +846,9 @@ async function searchPlace(query, resultsEl, onPick) {
   }
 }
 
-function makeHtmlMarker(html, lng, lat, className) {
+/* ── Markers ───────────────────────────────────────── */
+function makeHtmlMarker(html, lng, lat) {
   const el = document.createElement('div');
-  el.className = className || '';
   el.innerHTML = html;
   return new maplibregl.Marker({ element: el }).setLngLat([lng, lat]).addTo(map);
 }
@@ -712,11 +867,9 @@ function setDest(lat, lng, label) {
   $('dest-input').value = label || (lat.toFixed(5) + ', ' + lng.toFixed(5));
 }
 
+/* ── GPS ───────────────────────────────────────────── */
 function startGps() {
-  if (!navigator.geolocation) {
-    setPill('pill-gps', 'err', 'NO GEOLOCATION');
-    return;
-  }
+  if (!navigator.geolocation) { setPill('pill-gps', 'err', 'NO GEOLOCATION'); return; }
   setPill('pill-gps', 'active', 'LOCATING');
   if (gpsWatchId === null) {
     gpsWatchId = navigator.geolocation.watchPosition(onGps, onGpsError, GPS_WATCH_OPTIONS);
@@ -730,13 +883,11 @@ function startGps() {
 function pollGpsOnce() {
   if (!navigator.geolocation || gpsPollInFlight) return;
   gpsPollInFlight = true;
-  navigator.geolocation.getCurrentPosition(function(pos) {
-    gpsPollInFlight = false;
-    onGps(pos);
-  }, function(err) {
-    gpsPollInFlight = false;
-    onGpsError(err);
-  }, { enableHighAccuracy: true, maximumAge: 0, timeout: GPS_TIMEOUT_MS });
+  navigator.geolocation.getCurrentPosition(
+    function(pos) { gpsPollInFlight = false; onGps(pos); },
+    function(err) { gpsPollInFlight = false; onGpsError(err); },
+    { enableHighAccuracy: true, maximumAge: 0, timeout: GPS_TIMEOUT_MS }
+  );
 }
 
 function onGps(pos) {
@@ -749,15 +900,18 @@ function onGps(pos) {
   setPill('pill-gps', acc < 80 ? 'ok' : 'warn', lat.toFixed(4) + ',' + lng.toFixed(4) + ' +' + acc + 'm');
   updateGpsMarker(lat, lng, acc);
   if (!origin) setOrigin(lat, lng, 'Current GPS');
-  // FIX 3: fly to GPS location when triggered by Locate or GPS origin button
+
   if (pendingFlyToGps && !navActive) {
     pendingFlyToGps = false;
-    map.easeTo({ center: [lng, lat], zoom: 16, duration: 800 });
+    $('origin-gps').classList.remove('active');
+    if (!origin || origin.label === 'Current GPS') setOrigin(lat, lng, 'Current GPS');
+    flyToGpsWithSplash(lat, lng);
   }
   if (navActive) onNavPosition(pos);
 }
 
 function onGpsError(err) {
+  $('origin-gps').classList.remove('active');
   setPill('pill-gps', err.code === err.PERMISSION_DENIED ? 'err' : 'warn', err.message || 'GPS ERROR');
   dbg('GPS error: ' + err.message);
 }
@@ -769,32 +923,32 @@ function updateGpsMarker(lat, lng, acc) {
     gpsMarker.setLngLat([lng, lat]);
   }
   if (accuracySourceReady) {
-    map.getSource('accuracy').setData(acc > 30 ? circleFeature(lat, lng, acc) : { type: 'FeatureCollection', features: [] });
+    map.getSource('accuracy').setData(
+      acc > 30 ? circleFeature(lat, lng, acc) : { type: 'FeatureCollection', features: [] }
+    );
   }
 }
 
 function useGpsOrigin() {
   if (userLat === null) {
-    // FIX 3: will fly when GPS arrives
     pendingFlyToGps = true;
+    $('origin-gps').classList.add('active');
     startGps();
-    toast('Getting GPS first');
+    toast('Getting GPS...');
     return;
   }
   setOrigin(userLat, userLng, 'Current GPS');
-  // FIX 3: fly immediately when GPS is already known
-  map.easeTo({ center: [userLng, userLat], zoom: 16, duration: 800 });
+  flyToGpsWithSplash(userLat, userLng);
 }
 
+/* ── Routing ───────────────────────────────────────── */
 async function calculateRoute() {
-  if (!origin || !dest) {
-    toast('Set origin and destination first');
-    return;
-  }
+  if (!origin || !dest) { toast('Set origin and destination first'); return; }
   const url = 'https://graphhopper.com/api/1/route?point=' + origin.lat + ',' + origin.lng +
     '&point=' + dest.lat + ',' + dest.lng +
     '&vehicle=car&locale=en&points_encoded=false&instructions=true&calc_points=true&key=' + GH_KEY;
   setPill('pill-camera', 'active', 'ROUTING');
+  hideRoutePreview();
   try {
     const r = await fetch(url);
     if (!r.ok) throw new Error('GraphHopper ' + r.status);
@@ -809,7 +963,7 @@ async function calculateRoute() {
     map.getSource('remaining-route').setData(lineFeature([]));
     fitRoute(routeCoords);
     setPill('pill-camera', '', 'ROUTE READY');
-    toast('Route ready: ' + formatDist(routeTotalDistance));
+    showRoutePreview();
   } catch (e) {
     setPill('pill-camera', 'err', 'ROUTE ERROR');
     toast('Route failed');
@@ -818,8 +972,7 @@ async function calculateRoute() {
 }
 
 function extractSteps(path) {
-  const instructions = path.instructions || [];
-  return instructions.map(function(inst, idx) {
+  return (path.instructions || []).map(function(inst, idx) {
     return {
       instruction: stripHtml(inst.text || 'Continue'),
       distance: inst.distance || 0,
@@ -843,16 +996,15 @@ function fitRoute(coords) {
   map.fitBounds(bounds, { padding: 70, duration: 700 });
 }
 
+/* ── Navigation ────────────────────────────────────── */
 function toggleNavigation() {
   if (navActive) stopNavigation();
-  else startNavigation();
+  else if (currentRoute && routeCoords.length) showRoutePreview();
+  else toast('Calculate a route first');
 }
 
 async function startNavigation() {
-  if (!currentRoute || !routeCoords.length) {
-    toast('Calculate a route first');
-    return;
-  }
+  if (!currentRoute || !routeCoords.length) { toast('Calculate a route first'); return; }
   startGps();
   navActive = true;
   following = true;
@@ -862,13 +1014,15 @@ async function startNavigation() {
   $('nav-btn').textContent = 'Stop';
   $('nav-btn').classList.add('danger');
   $('recentre').classList.remove('visible');
-  // FIX 1: show floating stop button (visible on mobile where panel is hidden)
   $('nav-stop-float').classList.add('visible');
-  // Voice: reset state and announce start (called from button click → safe on iOS)
+
+  // Voice — called from button click, safe on iOS
   lastSpokenStep = -1;
   voiceThresholdsFired = {};
   speak('Navigation started. ' + (navSteps[0] ? navSteps[0].instruction : ''));
   startIosTtsKeepalive();
+
+  // 3D is handled by NAV_PITCH; update button state
   setPill('pill-camera', 'active', 'HEADING-UP');
   startHeading();
   await acquireWakeLock();
@@ -885,21 +1039,19 @@ function stopNavigation() {
   $('nav-btn').textContent = 'Navigate';
   $('nav-btn').classList.remove('danger');
   $('recentre').classList.remove('visible');
-  // FIX 1: hide floating stop button
   $('nav-stop-float').classList.remove('visible');
-  // Voice: cancel any ongoing speech and reset
+  hideRoutePreview();
+
   if (window.speechSynthesis) window.speechSynthesis.cancel();
   stopIosTtsKeepalive();
   lastSpokenStep = -1;
   voiceThresholdsFired = {};
-  map.easeTo({ pitch: 0, bearing: 0, duration: 700 });
+
+  map.easeTo({ pitch: is3D ? 45 : 0, bearing: 0, duration: 700 });
   map.getSource('remaining-route').setData(lineFeature([]));
   setPill('pill-camera', '', 'NORTH-UP');
   stopHeading();
-  if (wakeLock) {
-    wakeLock.release().catch(function(){});
-    wakeLock = null;
-  }
+  if (wakeLock) { wakeLock.release().catch(function(){}); wakeLock = null; }
 }
 
 function recentre() {
@@ -956,19 +1108,23 @@ function updateHud(stepIdx, distToManeuver, remainDist) {
   const left = remainDist !== undefined ? remainDist : routeTotalDistance;
   $('meta-dist').textContent = formatDist(left);
   $('meta-step').textContent = navSteps.length ? (stepIdx + 1) + '/' + navSteps.length : '--';
-  const etaSecs = routeTotalDistance > 0 && routeTotalTimeSecs > 0 ? routeTotalTimeSecs * (left / routeTotalDistance) : 0;
-  $('meta-eta').textContent = etaSecs ? new Date(Date.now() + etaSecs * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '--:--';
+  const etaSecs = routeTotalDistance > 0 && routeTotalTimeSecs > 0
+    ? routeTotalTimeSecs * (left / routeTotalDistance) : 0;
+  $('meta-eta').textContent = etaSecs
+    ? new Date(Date.now() + etaSecs * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : '--:--';
 }
 
 function arrowForSign(sign) {
   if (sign === -2 || sign === -3) return '↰';
-  if (sign === 2 || sign === 3) return '↱';
+  if (sign === 2  || sign === 3)  return '↱';
   if (sign === 4) return '↻';
   if (sign === 5) return '↺';
   if (sign === 6) return '↩';
   return '↑';
 }
 
+/* ── Compass / Heading ─────────────────────────────── */
 function startHeading() {
   if (!window.DeviceOrientationEvent) return;
   if (typeof DeviceOrientationEvent.requestPermission === 'function') {
@@ -997,26 +1153,18 @@ function onOrientation(e) {
   let heading = null;
   if (e.absolute && e.alpha !== null) heading = 360 - e.alpha;
   else if (e.webkitCompassHeading !== undefined) heading = e.webkitCompassHeading;
-  if (heading !== null && !isNaN(heading)) {
-    compassAvailable = true;
-    smoothHeading(heading);
-  }
+  if (heading !== null && !isNaN(heading)) { compassAvailable = true; smoothHeading(heading); }
 }
 
 function gpsHeadingFromPositions(lat, lng) {
-  if (lastGpsLat === null) {
-    lastGpsLat = lat;
-    lastGpsLng = lng;
-    return null;
-  }
+  if (lastGpsLat === null) { lastGpsLat = lat; lastGpsLng = lng; return null; }
   if (haversine(lastGpsLat, lastGpsLng, lat, lng) < 6) return null;
   const dLng = (lng - lastGpsLng) * Math.PI / 180;
   const lat1 = lastGpsLat * Math.PI / 180;
   const lat2 = lat * Math.PI / 180;
   const y = Math.sin(dLng) * Math.cos(lat2);
   const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
-  lastGpsLat = lat;
-  lastGpsLng = lng;
+  lastGpsLat = lat; lastGpsLng = lng;
   return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
 }
 
@@ -1032,8 +1180,8 @@ function smoothHeading(heading) {
   if (navActive) setPill('pill-camera', 'active', Math.round(headingSmoothed) + ' deg');
 }
 
+/* ── Traffic ───────────────────────────────────────── */
 async function refreshTraffic() {
-  if (userLat === null) startGps();
   if (!map.getLayer('tomtom-flow')) return;
   map.setPaintProperty('tomtom-flow', 'raster-opacity', 0.72);
   setPill('pill-traffic', 'active', 'FETCHING');
@@ -1062,14 +1210,15 @@ function renderIncidents(incidents) {
     const coords = inc.geometry && inc.geometry.coordinates;
     if (!coords) return;
     let lng, lat;
-    if (inc.geometry.type === 'Point') {
-      lng = coords[0]; lat = coords[1];
-    } else if (Array.isArray(coords[0])) {
-      lng = coords[0][0]; lat = coords[0][1];
-    }
+    if (inc.geometry.type === 'Point') { lng = coords[0]; lat = coords[1]; }
+    else if (Array.isArray(coords[0])) { lng = coords[0][0]; lat = coords[0][1]; }
     if (!lat || !lng) return;
-    const marker = makeHtmlMarker('<div class="incident-marker">' + incidentIcon(inc.properties && inc.properties.iconCategory) + '</div>', lng, lat);
-    const desc = inc.properties && inc.properties.events && inc.properties.events[0] ? inc.properties.events[0].description : 'Traffic incident';
+    const marker = makeHtmlMarker(
+      '<div class="incident-marker">' + incidentIcon(inc.properties && inc.properties.iconCategory) + '</div>',
+      lng, lat
+    );
+    const desc = inc.properties && inc.properties.events && inc.properties.events[0]
+      ? inc.properties.events[0].description : 'Traffic incident';
     marker.setPopup(new maplibregl.Popup({ offset: 20 }).setHTML('<b>' + desc + '</b>'));
     incidentMarkers.push(marker);
   });
@@ -1078,55 +1227,42 @@ function renderIncidents(incidents) {
 function incidentIcon(type) {
   const n = String(type || '').toLowerCase();
   if (n.includes('accident')) return '!';
-  if (n.includes('road')) return 'x';
-  if (n.includes('jam')) return '~';
+  if (n.includes('road'))     return 'x';
+  if (n.includes('jam'))      return '~';
   return '!';
 }
 
+/* ── Helpers ───────────────────────────────────────── */
 async function acquireWakeLock() {
   try {
     if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen');
-  } catch (e) {
-    dbg('Wake lock failed: ' + e.message);
-  }
+  } catch (e) { dbg('Wake lock failed: ' + e.message); }
 }
 
 document.addEventListener('visibilitychange', function() {
-  if (document.visibilityState === 'visible' && navActive) {
-    acquireWakeLock();
-    pollGpsOnce();
-  }
+  if (document.visibilityState === 'visible' && navActive) { acquireWakeLock(); pollGpsOnce(); }
 });
 
 function findClosestRoutePoint(lat, lng) {
-  let bestIdx = 0;
-  let bestDist = Infinity;
+  let bestIdx = 0, bestDist = Infinity;
   routeCoords.forEach(function(c, idx) {
     const d = haversine(lat, lng, c[0], c[1]);
-    if (d < bestDist) {
-      bestDist = d;
-      bestIdx = idx;
-    }
+    if (d < bestDist) { bestDist = d; bestIdx = idx; }
   });
   return { closestIdx: bestIdx, distToRoute: bestDist };
 }
 
 function haversine(lat1, lon1, lat2, lon2) {
-  const R = 6371000;
-  const toRad = Math.PI / 180;
-  const dLat = (lat2 - lat1) * toRad;
-  const dLon = (lon2 - lon1) * toRad;
-  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) *
-    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const R = 6371000, toRad = Math.PI / 180;
+  const dLat = (lat2 - lat1) * toRad, dLon = (lon2 - lon1) * toRad;
+  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*toRad)*Math.cos(lat2*toRad)*Math.sin(dLon/2)**2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
 function polylineLength(coords) {
   let total = 0;
-  for (let i = 1; i < coords.length; i++) {
-    total += haversine(coords[i - 1][0], coords[i - 1][1], coords[i][0], coords[i][1]);
-  }
+  for (let i = 1; i < coords.length; i++)
+    total += haversine(coords[i-1][0], coords[i-1][1], coords[i][0], coords[i][1]);
   return total;
 }
 
