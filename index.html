@@ -10,7 +10,7 @@
 <meta name="theme-color" content="#0d0f14">
 <link rel="apple-touch-icon" href="icon-192.png">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>PrivNav v15 — Traffic Overlay</title>
+<title>PrivNav v16 — Traffic Overlay</title>
 
 <style>/* required styles */
 
@@ -1657,7 +1657,7 @@ let panelVisible = true;
 // Persist API key locally (stays on device)
 const KEY_STORE = 'privnav_tt_key';
 const GH_KEY    = '10eb47ca-323f-45aa-a666-c55978a75e6a'; // GraphHopper
-const TT_KEY    = 'z0q4MOEZiJYluDAhrU2tyW88EuR2Soz0';                 // TomTom — hardcoded for personal use
+const TT_KEY    = 'z0q4MOEZiJYluDAhrU2tyW88EuR2Soz0';     // TomTom — hardcoded for personal use
 
 // ── MAP INIT ────────────────────────────────────────────
 function initMap() {
@@ -1683,7 +1683,7 @@ function initMap() {
   // Init map click handler for route picking
   initMapClickHandler();
 
-  // Hardcoded key takes priority; fall back to localStorage if constant is not set
+  // Hardcoded key takes priority; fall back to localStorage
   const saved = localStorage.getItem(KEY_STORE);
   const activeKey = TT_KEY || saved || '';
   document.getElementById('api-key').value = activeKey;
@@ -1696,19 +1696,19 @@ function initMap() {
 // More reliable on OxygenOS which throttles watchPosition callbacks
 let gpsWatchId     = null;  // polling interval reference
 let gpsInitialised = false;
-let lastAccuracy   = Infinity; // Infinity so first fix always triggers re-centre
+let lastAccuracy   = null;
 let accuracyCircle = null;
 let gpsPollActive  = false;
-let trafficFetched = false;   // prevent multiple fetchTrafficOnly calls on init
 
 function locateAndFetch() {
   if (!navigator.geolocation) {
     alert('Geolocation not supported.');
     return;
   }
-  setPill('pill-gps', 'active', 'LOCATING…');
-  showLoader(true);
-  trafficFetched = false;
+  if (!gpsInitialised) {
+    setPill('pill-gps', 'active', 'LOCATING…');
+    showLoader(true);
+  }
   startGpsPolling();
 }
 
@@ -1716,15 +1716,19 @@ function startGpsPolling() {
   dbg("startGpsPolling called, active=" + gpsPollActive);
   if (gpsPollActive) return;
   gpsPollActive = true;
-  // watchPosition streams fixes as fast as hardware allows (~1s when moving)
-  // avoids the stacking / freeze issue caused by setInterval + getCurrentPosition
-  gpsWatchId = navigator.geolocation.watchPosition(
+  pollGpsOnce(); // immediate first call
+  gpsWatchId = setInterval(pollGpsOnce, 3000); // then every 3 seconds
+}
+
+function pollGpsOnce() {
+  dbg("GPS poll fired");
+  navigator.geolocation.getCurrentPosition(
     onGpsUpdate,
     onGpsError,
     {
       enableHighAccuracy: true,
-      maximumAge: 1000,  // accept fix up to 1s old for quick first response
-      timeout: 30000,    // watchPosition manages its own retries — long timeout is fine
+      maximumAge: 0,
+      timeout: 10000,
     }
   );
 }
@@ -1732,12 +1736,10 @@ function startGpsPolling() {
 function stopGpsPolling() {
   gpsPollActive = false;
   if (gpsWatchId !== null) {
-    navigator.geolocation.clearWatch(gpsWatchId);
+    clearInterval(gpsWatchId);
     gpsWatchId = null;
   }
   gpsInitialised = false;
-  lastAccuracy = Infinity;
-  trafficFetched = false;
   if (accuracyCircle) { map.removeLayer(accuracyCircle); accuracyCircle = null; }
 }
 
@@ -1750,7 +1752,6 @@ function onGpsUpdate(pos) {
   var acc = Math.round(pos.coords.accuracy);
   dbg("GPS fix: " + lat.toFixed(5) + "," + lng.toFixed(5) + " acc:" + acc + "m");
 
-  // Always update internal position
   userLat = lat;
   userLng = lng;
 
@@ -1761,25 +1762,18 @@ function onGpsUpdate(pos) {
   placeGpsMarker(lat, lng);
   updateAccuracyCircle(lat, lng, acc);
 
-  // Re-centre map whenever accuracy improves (cell→WiFi→GPS progression)
-  // Compare BEFORE updating lastAccuracy so the comparison is valid
-  if (!navActive && acc < lastAccuracy) {
-    map.setView([lat, lng], gpsInitialised ? map.getZoom() : 15);
-  }
-
-  // First fix: hide loader
   if (!gpsInitialised) {
+    // First fix ever — centre map and kick off traffic
     gpsInitialised = true;
+    map.setView([lat, lng], 15);
     showLoader(false);
-  }
-
-  // Trigger traffic fetch once accuracy is usable (<500m) — not on ±2000m cell fix
-  if (!trafficFetched && acc < 500) {
-    trafficFetched = true;
     fetchTrafficOnly();
+  } else if (!navActive && lastAccuracy !== null && acc < lastAccuracy) {
+    // Accuracy improved (cell→WiFi→GPS) — re-centre map silently
+    map.setView([lat, lng], map.getZoom());
   }
 
-  // Update lastAccuracy AFTER comparisons above
+  // Update AFTER comparisons so next fix can compare correctly
   lastAccuracy = acc;
 
   if (navActive) {
@@ -1813,11 +1807,7 @@ function updateAccuracyCircle(lat, lng, acc) {
 }
 
 function placeGpsMarker(lat, lng) {
-  if (gpsMarker) {
-    // Move existing marker — no flicker, no remove/add cycle
-    gpsMarker.setLatLng([lat, lng]);
-    return;
-  }
+  if (gpsMarker) { gpsMarker.setLatLng([lat, lng]); return; }
   const icon = L.divIcon({
     className: '',
     html: '<div class="gps-marker"></div>',
@@ -2533,9 +2523,8 @@ async function startNavigation() {
   updateHUD(0, 0);
   speak(navSteps[0] ? navSteps[0].instruction : 'Starting navigation');
 
-  // navActive = true is sufficient — onGpsUpdate calls onNavPosition when navActive
-  // navWatchId is kept as null; visibilitychange handler will restart if needed
-  navWatchId = null;
+  // GPS polling already running — nav piggybacks on same stream
+  navWatchId = gpsWatchId;
 }
 
 function stopNavigation() {
@@ -2584,11 +2573,9 @@ async function autoRerouteFromGps(lat, lng) {
   autoRerouteInProgress = true;
   dbg('Auto-reroute from ' + lat.toFixed(5) + ',' + lng.toFixed(5));
   speak('Recalculating');
-  originLat = lat;
-  originLng = lng;
+  originLat = lat; originLng = lng;
   try {
-    const CHAFF_COUNT = 4;
-    const chaffPoints = generateChaffPoints(CHAFF_COUNT);
+    const chaffPoints = generateChaffPoints(4);
     const [realResult] = await Promise.all([
       fetchRealRoute(GH_KEY),
       ...chaffPoints.map(p => fireChaffQuery(GH_KEY, p.oLat, p.oLng, p.dLat, p.dLng)),
@@ -2598,14 +2585,10 @@ async function autoRerouteFromGps(lat, lng) {
       var ghCoords = realResult.paths[0].points.coordinates;
       allRouteCoords = ghCoords.map(function(c) { return [c[1], c[0]]; });
       navSteps = extractNavSteps(realResult);
-      navCurrentStep = 0;
-      offRouteCount = 0;
-      lastAnnounceStep = -1;
+      navCurrentStep = 0; offRouteCount = 0; lastAnnounceStep = -1;
       if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
       if (routeSegLayers) { routeSegLayers.forEach(function(l){ map.removeLayer(l); }); routeSegLayers = []; }
-      routeLayer = L.polyline(allRouteCoords, {
-        color: '#4f8ef7', weight: 5, opacity: 0.85, lineJoin: 'round', lineCap: 'round',
-      }).addTo(map);
+      routeLayer = L.polyline(allRouteCoords, { color: '#4f8ef7', weight: 5, opacity: 0.85, lineJoin: 'round', lineCap: 'round' }).addTo(map);
       document.getElementById('offroute-banner').style.display = 'none';
       speak('Route updated');
       dbg('Auto-reroute OK: ' + navSteps.length + ' steps');
@@ -2643,8 +2626,7 @@ function onNavPosition(pos) {
     offRouteCount++;
     if (offRouteCount >= OFF_ROUTE_STRIKES) {
       document.getElementById('offroute-banner').style.display = 'block';
-      // Auto-reroute from real GPS position if accuracy is good enough
-      if (!autoRerouteInProgress && lastAccuracy < 80) {
+      if (!autoRerouteInProgress && lastAccuracy !== null && lastAccuracy < 80) {
         autoRerouteFromGps(lat, lng);
       }
     }
@@ -3212,9 +3194,13 @@ document.addEventListener('visibilitychange', async function() {
   if (document.visibilityState === 'visible' && navActive) {
     // Re-acquire wake lock — it gets dropped when page is hidden
     await acquireWakeLock();
-    // Restart watchPosition if it was suspended (e.g. after phone call)
-    if (!gpsPollActive || gpsWatchId === null) {
-      startGpsPolling();
+    // Also re-acquire GPS watch in case it was suspended
+    if (navWatchId === null) {
+      navWatchId = navigator.geolocation.watchPosition(
+        onNavPosition,
+        function(err) { console.warn('Nav GPS error:', err.message); },
+        { enableHighAccuracy: true, maximumAge: 3000, timeout: 30000 }
+      );
     }
   }
 });
