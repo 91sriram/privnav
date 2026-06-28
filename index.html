@@ -193,6 +193,7 @@
   .result:last-child { border-bottom: 0; }
   .result-name { font-size: 13px; font-weight: 700; }
   .result-addr { margin-top: 2px; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .result-badge { opacity: 0.45; margin-right: 4px; font-size: 0.85em; }
 
   /* ── Nav HUD ─────────────────────────────────────── */
   #nav-hud {
@@ -537,15 +538,29 @@ const KF_MAX_INNOVATION_M    = 180;    // innovation > this (m) → outlier reje
 const OUTLIER_MAX_SPEED_MS   = 55;     // reject if implied speed > this m/s (≈ 200 km/h)
 const OUTLIER_MAX_JUMP_M     = 400;    // reject if position jump > this (m)
 const OUTLIER_MIN_ACCURACY   = 200;    // reject if GPS accuracy worse than this (m)
-const MARKER_LERP_ALPHA      = 0.08;   // display-position interpolation per rAF frame (~60 fps)
-const HEADING_LERP_ALPHA     = 0.12;   // heading interpolation per rAF frame
-const MAP_MATCH_SNAP_M       = 28;     // snap display dot to route if within this distance (m)
 const ETA_SPEED_WINDOW_MS    = 25000;  // rolling speed average window (ms)
 const ETA_BLEND_ALPHA        = 0.30;   // weight of current-speed ETA vs GraphHopper baseline
 const ETA_SMOOTH_ALPHA       = 0.08;   // ETA update smoothing factor
 const ETA_MIN_MOVE_MS        = 1.0;    // ignore speed samples below this (m/s) for ETA — filters stops
 const GPS_LOG_SIZE           = 300;    // rolling in-memory GPS log entries
 const DIAG_MODE              = false;  // set true to show diagnostic overlay while driving
+
+// ── Predictive motion & camera look-ahead ────────────────────────────────────
+const KF_PREDICT_DT      = 0.75;  // seconds to extrapolate ahead for display marker
+const KF_MIN_SPEED_MS    = 0.8;   // below this (m/s) prediction is disabled (avoids jitter at stops)
+const LOOKAHEAD_BASE_M   = 60;    // camera offset ahead of vehicle at zero speed (m)
+const LOOKAHEAD_SCALE    = 2.5;   // additional m of look-ahead per m/s of vehicle speed
+const LOOKAHEAD_MAX_M    = 220;   // maximum camera offset (m ≈ achieved at ~64 m/s)
+
+// ── Arrival detection ────────────────────────────────────────────────────────
+const ARRIVAL_DIST_M   = 50;  // remaining route (m) below which arrival is possible
+const ARRIVAL_RADIUS_M = 35;  // GPS distance-to-destination that starts the dwell timer
+const ARRIVAL_DWELL_S  = 5;   // seconds at low speed inside radius to confirm arrival
+
+// ── Search Manager ───────────────────────────────────────────────────────────
+const SEARCH_DEBOUNCE_MS = 300;
+const SEARCH_MIN_CHARS   = 3;
+const SEARCH_CACHE_SIZE  = 50;
 
 let map;
 let gpsMarker = null;
@@ -614,6 +629,24 @@ let currentRouteIdx = 0;        // updated in syncNavigation, read by updateHud
 // ── Navigation state machine ──────────────────────────────────────────────────
 let isRerouting    = false;     // true while async reroute fetch is in-flight
 let gpsMarkerIsArrow = false;   // tracks which type of GPS marker is currently shown
+
+// ── Camera smoothing ─────────────────────────────────────────────────────────
+let headingChangeRate = 0;      // smoothed deg/s — drives turn-zoom and look-ahead boost
+let lastHeadingMs    = 0;
+let navZoomSmoothed  = NAV_ZOOM;
+
+// ── Smooth maneuver distance ─────────────────────────────────────────────────
+let displayedDistToManeuver = 0;   // interpolated between GPS fixes
+let lastHudDistMs           = 0;
+let smoothDistTimer         = null;
+
+// ── Arrival detection ────────────────────────────────────────────────────────
+let arrivalRadiusEnterTime = null;
+let arrivalConfirmed       = false;
+
+// ── Search ───────────────────────────────────────────────────────────────────
+let searchCache    = {};   // query → normalized results, localStorage-backed
+let recentSearches = [];   // last-picked places
 
 // Voice state
 let voiceMuted = false;
@@ -694,7 +727,7 @@ function stopIosTtsKeepalive() {
 // displayStep = the upcoming maneuver the user is approaching
 // distToManeuver = metres to that maneuver's trigger point
 function announceNavUpdate(displayStep, distToManeuver) {
-  if (isRerouting || !navSteps.length) return;
+  if (isRerouting || arrivalConfirmed || !navSteps.length) return;
   const step = navSteps[displayStep];
   if (!step) return;
 
@@ -741,15 +774,16 @@ function hideRoutePreview() {
    ═══════════════════════════════════════════════════ */
 
 /* ── 1. Kalman filter (two independent 1-D filters) ─ */
-function kf1dPredict(s, dt) {
-  // State transition: x_new = x + v*dt,  v_new = v
-  const x = s.x + s.v * dt;
-  const v = s.v;
-  // P = F*P*F' + Q  (F=[[1,dt],[0,1]], Q=diag([Q_pos, Q_vel]))
-  const p00 = s.p[0][0] + dt * (s.p[0][1] + s.p[1][0]) + dt * dt * s.p[1][1] + KF_PROCESS_NOISE_POS;
+function kf1dPredict(s, dt, qPos, qVel) {
+  // Optional Q params allow adaptive process noise without touching constants
+  qPos = (qPos !== undefined) ? qPos : KF_PROCESS_NOISE_POS;
+  qVel = (qVel !== undefined) ? qVel : KF_PROCESS_NOISE_VEL;
+  const x   = s.x + s.v * dt;
+  const v   = s.v;
+  const p00 = s.p[0][0] + dt * (s.p[0][1] + s.p[1][0]) + dt * dt * s.p[1][1] + qPos;
   const p01 = s.p[0][1] + dt * s.p[1][1];
   const p10 = s.p[1][0] + dt * s.p[1][1];
-  const p11 = s.p[1][1] + KF_PROCESS_NOISE_VEL;
+  const p11 = s.p[1][1] + qVel;
   return { x, v, p: [[p00, p01], [p10, p11]] };
 }
 
@@ -769,6 +803,17 @@ function kf1dUpdate(s, meas, R) {
   return { x, v, p: [[p00, p01], [p10, p11]], K: K0, innovation: y };
 }
 
+// Speed-adaptive noise multipliers — single tuning point for all speed regimes.
+// q: process-noise scale (higher → trust measurements more, faster response)
+// r: measurement-noise scale (higher → trust model more, more stability)
+function kfNoiseScale(speedMs) {
+  if (speedMs < 2)  return { q: 0.25, r: 2.5 };  // stationary / walking — maximum stability
+  if (speedMs < 7)  return { q: 0.6,  r: 1.5 };  // slow urban (traffic)
+  if (speedMs < 15) return { q: 1.0,  r: 1.0 };  // normal city driving — baseline
+  if (speedMs < 25) return { q: 1.8,  r: 0.7 };  // fast urban / arterial
+  return              { q: 2.8,  r: 0.5 };        // highway — maximum responsiveness
+}
+
 function kfInit(lat, lng) {
   const P0 = [[1e-6, 0], [0, 1e-8]]; // ~110 m pos, ~0.1 deg/s vel uncertainty
   kfLat = { x: lat, v: 0, p: [P0[0].slice(), P0[1].slice()] };
@@ -778,23 +823,26 @@ function kfInit(lat, lng) {
   kfUpdateCount = 0;
 }
 
-function kfProcess(rawLat, rawLng, acc, confidence) {
+function kfProcess(rawLat, rawLng, acc, confidence, speedMs) {
   const now = Date.now();
-  const dt  = Math.min((now - kfLastTime) / 1000, 10); // seconds, cap at 10s gap
+  const dt  = Math.min((now - kfLastTime) / 1000, 10);
   kfLastTime = now;
 
   if (!kfInitialized) { kfInit(rawLat, rawLng); }
 
-  // Predict
-  kfLat = kf1dPredict(kfLat, dt);
-  kfLng = kf1dPredict(kfLng, dt);
+  // Adaptive noise based on vehicle speed
+  const ns  = kfNoiseScale(speedMs || 0);
+  const qP  = KF_PROCESS_NOISE_POS * ns.q;
+  const qV  = KF_PROCESS_NOISE_VEL * ns.q;
 
-  // Measurement noise: base scaled by accuracy and confidence
+  kfLat = kf1dPredict(kfLat, dt, qP, qV);
+  kfLng = kf1dPredict(kfLng, dt, qP, qV);
+
+  // Measurement noise: accuracy + confidence + speed scaling
   const accDeg = acc / 111320;
   const R_raw  = Math.max(KF_MEAS_NOISE_BASE, accDeg * accDeg);
-  const R      = R_raw * Math.exp(KF_CONF_WEIGHT_SCALE * (1 - confidence / 100));
+  const R      = R_raw * Math.exp(KF_CONF_WEIGHT_SCALE * (1 - confidence / 100)) * ns.r;
 
-  // Update
   const resLat = kf1dUpdate(kfLat, rawLat, R);
   const resLng = kf1dUpdate(kfLng, rawLng, R);
   kfLat = resLat;
@@ -813,8 +861,9 @@ function kfPredictOnly() {
   const now = Date.now();
   const dt  = Math.min((now - kfLastTime) / 1000, 10);
   kfLastTime = now;
-  kfLat = kf1dPredict(kfLat, dt);
-  kfLng = kf1dPredict(kfLng, dt);
+  const ns = kfNoiseScale(speedFromKf());
+  kfLat = kf1dPredict(kfLat, dt, KF_PROCESS_NOISE_POS * ns.q, KF_PROCESS_NOISE_VEL * ns.q);
+  kfLng = kf1dPredict(kfLng, dt, KF_PROCESS_NOISE_POS * ns.q, KF_PROCESS_NOISE_VEL * ns.q);
 }
 
 function headingFromKf() {
@@ -908,25 +957,37 @@ function checkOutlier(rawLat, rawLng, acc, now) {
 }
 
 /* ── 4. Map Matching (display only) ──────────────────*/
-function mapMatchDisplay(filtLat, filtLng) {
+// confidence 0-100, speedMs in m/s.
+// Snap threshold adapts: tighter at high confidence/low speed, looser otherwise.
+// Search starts from currentRouteIdx to never snap backwards onto completed segments.
+function mapMatchDisplay(filtLat, filtLng, confidence, speedMs) {
   if (!navActive || !routeCoords.length) return { lat: filtLat, lng: filtLng };
+
+  // Adaptive threshold: 15 m (perfect) → 50 m (poor conf + high speed)
+  const confFactor = 1 - Math.max(0, Math.min(100, confidence || 0)) / 100;
+  const spdFactor  = Math.min(1, (speedMs || 0) / 20);
+  const snapDist   = 15 + confFactor * 20 + spdFactor * 15;
+
+  // Small backward buffer (−2 segments) to tolerate brief closestIdx oscillation
+  const startIdx = Math.max(0, currentRouteIdx - 2);
+
   let bestDist = Infinity, snapLat = filtLat, snapLng = filtLng;
-  for (let i = 0; i < routeCoords.length - 1; i++) {
+  for (let i = startIdx; i < routeCoords.length - 1; i++) {
     const p0 = routeCoords[i], p1 = routeCoords[i + 1];
     const cosLat = Math.cos(filtLat * Math.PI / 180);
     const x  = (filtLng - p0[1]) * cosLat * 111320;
     const y  = (filtLat - p0[0]) * 111320;
     const dx = (p1[1]  - p0[1]) * cosLat * 111320;
     const dy = (p1[0]  - p0[0]) * 111320;
-    const lenSq = dx*dx + dy*dy;
+    const lenSq = dx * dx + dy * dy;
     const t = lenSq > 0 ? Math.max(0, Math.min(1, (x*dx + y*dy) / lenSq)) : 0;
     const pLat = p0[0] + t * (p1[0] - p0[0]);
     const pLng = p0[1] + t * (p1[1] - p0[1]);
     const d = haversine(filtLat, filtLng, pLat, pLng);
     if (d < bestDist) { bestDist = d; snapLat = pLat; snapLng = pLng; }
   }
-  // Only snap when close enough — avoids snapping during off-road sections
-  if (bestDist <= MAP_MATCH_SNAP_M) return { lat: snapLat, lng: snapLng };
+
+  if (bestDist <= snapDist) return { lat: snapLat, lng: snapLng };
   return { lat: filtLat, lng: filtLng };
 }
 
@@ -943,15 +1004,20 @@ function stopMarkerAnimation() {
 function markerAnimFrame() {
   if (tgtLat === null) { markerRafId = null; return; }
 
-  // Lerp position
-  dispLat += (tgtLat - dispLat) * MARKER_LERP_ALPHA;
-  dispLng += (tgtLng - dispLng) * MARKER_LERP_ALPHA;
+  // Adaptive lerp: slow at low speed (stability), faster at highway speeds (reduced lag)
+  // posAlpha: 0.03 (stopped) → 0.18 (≥35 m/s)
+  // hdgAlpha: 0.05 (stopped) → 0.22 (≥35 m/s)
+  const spd      = speedFromKf();
+  const posAlpha = Math.max(0.03, Math.min(0.18, 0.03 + spd * 0.0043));
+  const hdgAlpha = Math.max(0.05, Math.min(0.22, 0.05 + spd * 0.0049));
 
-  // Lerp heading (handle 360° wraparound)
+  dispLat += (tgtLat - dispLat) * posAlpha;
+  dispLng += (tgtLng - dispLng) * posAlpha;
+
   let dh = tgtHdg - dispHdg;
-  if (dh > 180) dh -= 360;
+  if (dh > 180)  dh -= 360;
   if (dh < -180) dh += 360;
-  dispHdg += dh * HEADING_LERP_ALPHA;
+  dispHdg += dh * hdgAlpha;
 
   if (gpsMarker) {
     gpsMarker.setLngLat([dispLng, dispLat]);
@@ -1021,6 +1087,21 @@ function updateDiag(quality, acc, spd, hdg, kgain, innov, rawLat, rawLng) {
   $('dv-drift').textContent   = drift + ' m';
   $('dv-lerp').textContent    = lerp + ' m';
   $('dv-innov').textContent   = Math.round(innov) + ' m';
+}
+
+/* ── Camera Look-Ahead ─────────────────────────────── */
+// Returns a [lng, lat] point that is LOOKAHEAD meters ahead of the vehicle.
+// Centering the map here places the vehicle in the lower portion of the viewport,
+// giving the driver more road visibility. Distance scales with speed.
+function cameraLookAheadCenter(lat, lng, headingDeg, speedMs) {
+  const base      = Math.min(LOOKAHEAD_BASE_M + speedMs * LOOKAHEAD_SCALE, LOOKAHEAD_MAX_M);
+  const turnBoost = Math.min(28, headingChangeRate * 1.3);  // extra metres during turns
+  const d         = base + turnBoost;
+  const hdgRad    = headingDeg * Math.PI / 180;
+  const cosLat    = Math.cos(lat * Math.PI / 180);
+  const dLat      = (d * Math.cos(hdgRad)) / 111320;
+  const dLng      = (d * Math.sin(hdgRad)) / (111320 * cosLat);
+  return [lng + dLng, lat + dLat];
 }
 
 /* ── Map init ──────────────────────────────────────── */
@@ -1093,7 +1174,7 @@ function addRouteSources() {
     type: 'line',
     source: 'traffic-route',
     layout: { 'line-join': 'round', 'line-cap': 'round' },
-    paint: { 'line-color': '#ffffff', 'line-width': 11, 'line-opacity': 0.95 }
+    paint: { 'line-color': '#ffffff', 'line-width': 13, 'line-opacity': 0.95 }
   });
   map.addLayer({
     id: 'traffic-route',
@@ -1101,10 +1182,20 @@ function addRouteSources() {
     source: 'traffic-route',
     layout: { 'line-join': 'round', 'line-cap': 'round' },
     paint: {
-      'line-color': ['coalesce', ['get', 'color'], '#4f8ef7'],
-      'line-width': 7,
+      'line-color': ['coalesce', ['get', 'color'], '#3e82e0'],
+      'line-width': 8,
       'line-opacity': 0.97
     }
+  });
+
+  // Bright-blue highlight for the next 400m — sits on top of traffic-route
+  map.addSource('route-highlight', { type: 'geojson', data: lineFeature([]) });
+  map.addLayer({
+    id: 'route-highlight',
+    type: 'line',
+    source: 'route-highlight',
+    layout: { 'line-join': 'round', 'line-cap': 'round' },
+    paint: { 'line-color': '#72c0ff', 'line-width': 8, 'line-opacity': 0.0 }
   });
 }
 
@@ -1192,61 +1283,204 @@ function initHandlers() {
     $('debug').style.display = $('debug').style.display === 'block' ? 'none' : 'block';
   });
 
+  loadSearchHistory();
   bindSearch('origin');
   bindSearch('dest');
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function(){});
 }
 
-function bindSearch(kind) {
-  const input = $(kind + '-input');
-  const results = $(kind + '-results');
-  let timer = null;
-  input.addEventListener('input', function() {
-    clearTimeout(timer);
-    const q = input.value.trim();
-    if (q.length < 3) { results.style.display = 'none'; results.innerHTML = ''; return; }
-    timer = setTimeout(function() {
-      searchPlace(q, results, function(place) {
-        const lat = parseFloat(place.lat);
-        const lng = parseFloat(place.lon);
-        const name = place.display_name.split(',').slice(0, 2).join(',');
-        input.value = name;
-        results.style.display = 'none';
-        results.innerHTML = '';
-        if (kind === 'origin') setOrigin(lat, lng, name);
-        else setDest(lat, lng, name);
-        map.easeTo({ center: [lng, lat], zoom: 15, duration: 600 });
-      });
-    }, 450);
+/* ── Search Manager ────────────────────────────────── */
+function loadSearchHistory() {
+  try {
+    searchCache    = JSON.parse(localStorage.getItem('pn_scache') || '{}');
+    recentSearches = JSON.parse(localStorage.getItem('pn_recent') || '[]');
+  } catch(e) { searchCache = {}; recentSearches = []; }
+}
+
+function saveCache() {
+  try {
+    const keys = Object.keys(searchCache);
+    if (keys.length > SEARCH_CACHE_SIZE) {
+      const keep = {};
+      keys.slice(-SEARCH_CACHE_SIZE).forEach(function(k) { keep[k] = searchCache[k]; });
+      searchCache = keep;
+    }
+    localStorage.setItem('pn_scache', JSON.stringify(searchCache));
+  } catch(e) {}
+}
+
+function addRecentSearch(name, lat, lng) {
+  recentSearches = recentSearches.filter(function(r) { return r.name !== name; });
+  recentSearches.unshift({ name: name, lat: lat, lng: lng });
+  recentSearches = recentSearches.slice(0, 10);
+  try { localStorage.setItem('pn_recent', JSON.stringify(recentSearches)); } catch(e) {}
+}
+
+function escHtml(s) {
+  return String(s || '').replace(/[&<>"']/g, function(c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
   });
 }
 
-async function searchPlace(query, resultsEl, onPick) {
-  resultsEl.style.display = 'block';
-  resultsEl.innerHTML = '<div class="result"><div class="result-name">Searching...</div></div>';
+function normTomTom(r) {
+  const pos  = r.position || {};
+  const poi  = r.poi || {};
+  const addr = r.address || {};
+  const name = poi.name || (addr.freeformAddress || '').split(',')[0] || addr.municipality || 'Place';
+  return { lat: pos.lat, lng: pos.lon, name: name, address: addr.freeformAddress || '', score: (r.score || 5) / 10, provider: 'tt' };
+}
+
+function normNominatim(r) {
+  const parts = (r.display_name || '').split(',');
+  return { lat: parseFloat(r.lat), lng: parseFloat(r.lon), name: parts.slice(0, 2).join(',').trim(), address: r.display_name || '', score: r.importance || 0.3, provider: 'nom' };
+}
+
+function proximityScore(lat, lng) {
+  if (!userLat || lat == null || lng == null) return 0.5;
+  return Math.max(0, 1 - haversine(userLat, userLng, lat, lng) / 50000);
+}
+
+function deduplicateAndRank(items) {
+  const out = [];
+  items.forEach(function(r) {
+    if (r.lat == null || r.lng == null) return;
+    if (out.some(function(e) { return haversine(e.lat, e.lng, r.lat, r.lng) < 80; })) return;
+    out.push(r);
+  });
+  out.sort(function(a, b) {
+    return (proximityScore(b.lat, b.lng) * 0.4 + b.score * 0.6) -
+           (proximityScore(a.lat, a.lng) * 0.4 + a.score * 0.6);
+  });
+  return out.slice(0, 6);
+}
+
+async function fetchTomTom(query, signal) {
+  const prox = userLat ? '&lat=' + userLat + '&lon=' + userLng + '&radius=30000' : '';
+  const url = 'https://api.tomtom.com/search/2/search/' + encodeURIComponent(query) +
+    '.json?key=' + TT_KEY + '&limit=6&countrySet=IN' + prox + '&language=en-GB';
+  const r = await fetch(url, { signal: signal });
+  if (!r.ok) throw new Error('TT ' + r.status);
+  return ((await r.json()).results || []).map(normTomTom);
+}
+
+async function fetchNominatim(query, signal) {
+  const prox = userLat
+    ? '&viewbox=' + (userLng-0.5) + ',' + (userLat-0.4) + ',' + (userLng+0.5) + ',' + (userLat+0.4)
+    : '&viewbox=79.8,12.3,80.5,13.5';
   const url = 'https://nominatim.openstreetmap.org/search?q=' + encodeURIComponent(query) +
-    '&format=json&limit=6&viewbox=79.8,12.3,80.5,13.5&bounded=0&countrycodes=in&addressdetails=1&accept-language=en';
+    '&format=json&limit=6' + prox + '&bounded=0&countrycodes=in&addressdetails=1&accept-language=en';
+  const r = await fetch(url, { signal: signal, headers: { 'User-Agent': 'PrivNav/2.0' } });
+  if (!r.ok) throw new Error('Nom ' + r.status);
+  return (await r.json()).map(normNominatim);
+}
+
+async function smartSearch(query, ctrl) {
+  const key = query.toLowerCase().trim();
+  if (searchCache[key]) return searchCache[key];
+  const sig = ctrl.signal;
+  let results;
   try {
-    const r = await fetch(url, { headers: { 'User-Agent': 'PrivNav/2.0' } });
-    const data = await r.json();
-    resultsEl.innerHTML = '';
-    if (!data.length) {
-      resultsEl.innerHTML = '<div class="result"><div class="result-name">No results</div></div>';
-      return;
+    const ttR = await fetchTomTom(query, sig);
+    if (ttR.length >= 3) {
+      results = deduplicateAndRank(ttR);
+    } else {
+      const nomR = await fetchNominatim(query, sig);
+      results = deduplicateAndRank([].concat(ttR, nomR));
     }
-    data.forEach(function(place) {
-      const item = document.createElement('div');
-      item.className = 'result';
-      const parts = place.display_name.split(',');
-      item.innerHTML = '<div class="result-name">' + parts.slice(0, 2).join(',') + '</div>' +
-        '<div class="result-addr">' + place.display_name + '</div>';
-      item.addEventListener('click', function() { onPick(place); });
-      resultsEl.appendChild(item);
-    });
-  } catch (e) {
-    resultsEl.innerHTML = '<div class="result"><div class="result-name">Search failed</div></div>';
-    dbg('Search failed: ' + e.message);
+  } catch(e) {
+    if (e.name === 'AbortError') throw e;
+    try {
+      results = deduplicateAndRank(await fetchNominatim(query, sig));
+    } catch(e2) {
+      if (e2.name === 'AbortError') throw e2;
+      throw new Error('Search failed');
+    }
   }
+  if (results && results.length) { searchCache[key] = results; saveCache(); }
+  return results || [];
+}
+
+function renderResults(items, resultsEl, onPick) {
+  resultsEl.innerHTML = '';
+  if (!items || !items.length) {
+    resultsEl.innerHTML = '<div class="result"><div class="result-name">No results</div></div>';
+    resultsEl.style.display = 'block';
+    return;
+  }
+  resultsEl.style.display = 'block';
+  items.forEach(function(r) {
+    const el = document.createElement('div');
+    el.className = 'result';
+    const badge = r.provider === 'recent' ? '<span class="result-badge">↺</span>' : '';
+    el.innerHTML = '<div class="result-name">' + badge + escHtml(r.name) + '</div>' +
+      (r.address && r.address !== r.name ? '<div class="result-addr">' + escHtml(r.address) + '</div>' : '');
+    el.addEventListener('click', function() { onPick(r); });
+    resultsEl.appendChild(el);
+  });
+}
+
+function bindSearch(kind) {
+  const input   = $(kind + '-input');
+  const results = $(kind + '-results');
+  let timer = null, searchCtrl = null;
+
+  function onPick(r) {
+    const lat = parseFloat(r.lat), lng = parseFloat(r.lng);
+    input.value = r.name;
+    results.style.display = 'none';
+    results.innerHTML = '';
+    if (kind === 'origin') setOrigin(lat, lng, r.name);
+    else setDest(lat, lng, r.name);
+    map.easeTo({ center: [lng, lat], zoom: 15, duration: 600 });
+    addRecentSearch(r.name, lat, lng);
+  }
+
+  input.addEventListener('focus', function() {
+    if (input.value.trim().length < SEARCH_MIN_CHARS && recentSearches.length) {
+      renderResults(recentSearches.slice(0, 5).map(function(r) {
+        return { lat: r.lat, lng: r.lng, name: r.name, address: '', score: 1.0, provider: 'recent' };
+      }), results, onPick);
+    }
+  });
+
+  input.addEventListener('blur', function() {
+    setTimeout(function() { results.style.display = 'none'; }, 200);
+  });
+
+  input.addEventListener('input', function() {
+    clearTimeout(timer);
+    if (searchCtrl) { searchCtrl.abort(); searchCtrl = null; }
+    const q = input.value.trim();
+    if (q.length < SEARCH_MIN_CHARS) { results.style.display = 'none'; results.innerHTML = ''; return; }
+
+    const recentMatches = recentSearches
+      .filter(function(r) { return r.name.toLowerCase().indexOf(q.toLowerCase()) !== -1; })
+      .slice(0, 3)
+      .map(function(r) { return { lat: r.lat, lng: r.lng, name: r.name, address: '', score: 1.0, provider: 'recent' }; });
+
+    if (recentMatches.length) {
+      renderResults(recentMatches, results, onPick);
+    } else {
+      results.style.display = 'block';
+      results.innerHTML = '<div class="result"><div class="result-name">Searching…</div></div>';
+    }
+
+    timer = setTimeout(function() {
+      searchCtrl = new AbortController();
+      const ctrl = searchCtrl;
+      smartSearch(q, ctrl).then(function(live) {
+        const merged = deduplicateAndRank(
+          recentMatches.map(function(r) { return { lat: r.lat, lng: r.lng, name: r.name, address: r.address, score: 2.0, provider: 'recent' }; })
+            .concat(live)
+        );
+        renderResults(merged, results, onPick);
+      }).catch(function(e) {
+        if (e.name === 'AbortError') return;
+        if (!recentMatches.length) results.innerHTML = '<div class="result"><div class="result-name">Search failed</div></div>';
+        dbg('Search: ' + e.message);
+      });
+    }, SEARCH_DEBOUNCE_MS);
+  });
 }
 
 /* ── Markers ───────────────────────────────────────── */
@@ -1254,7 +1488,8 @@ async function searchPlace(query, resultsEl, onPick) {
 // Outer white path gives the halo; inner blue path is the arrow body.
 const GPS_ARROW_SVG =
   '<svg xmlns="http://www.w3.org/2000/svg" width="28" height="38" viewBox="0 0 28 38">' +
-    '<path d="M14 1 L27 36 L14 27 L1 36 Z" fill="white" opacity="0.9"/>' +
+    '<path d="M14 0 L28 37 L14 28 L0 37 Z" fill="rgba(0,0,0,0.45)"/>' +
+    '<path d="M14 1 L27 36 L14 27 L1 36 Z" fill="white" opacity="0.95"/>' +
     '<path d="M14 4 L25 33 L14 24.5 L3 33 Z" fill="#4f8ef7"/>' +
     '<circle cx="14" cy="14" r="2.5" fill="white" opacity="0.55"/>' +
   '</svg>';
@@ -1333,30 +1568,31 @@ function onGps(pos) {
 
   // Stage 2 – Outlier Rejection
   const chk = checkOutlier(rawLat, rawLng, acc, now);
-  let filtLat, filtLng, kgain = 0, innov = 0;
+  let filtLat, filtLng, kgain = 0, innov = 0, kfSpd = 0;
 
   if (chk.rejected) {
-    // Predict-only: advance KF in time without a measurement update
-    kfPredictOnly();
+    kfPredictOnly();  // adaptive noise, uses current KF speed internally
     filtLat = kfInitialized ? kfLat.x : rawLat;
     filtLng = kfInitialized ? kfLng.x : rawLng;
+    kfSpd   = speedFromKf();
     rejectedCount++;
     dbg('GPS rejected – ' + chk.reason);
   } else {
-    // Stage 3 – Kalman Filter Update
-    const kfr = kfProcess(rawLat, rawLng, acc, quality.score);
+    // Stage 3 – Adaptive Kalman Filter Update
+    // Pre-update speed drives noise selection; post-update speed used for display
+    const preSpd = speedFromKf() || rawSpd;
+    const kfr    = kfProcess(rawLat, rawLng, acc, quality.score, preSpd);
     filtLat = kfr.lat;
     filtLng = kfr.lng;
     kgain   = kfr.gain;
     innov   = kfr.innovation;
-    // Update speed history (prefer KF-derived speed, fall back to GPS speed)
-    recordSpeed(speedFromKf() || rawSpd);
-    // Accept this fix as the new "last raw" baseline
+    kfSpd   = speedFromKf();
+    recordSpeed(kfSpd || rawSpd);
     lastRawFix = { lat: rawLat, lng: rawLng, acc, speed: rawSpd, heading: rawHdg, time: now };
   }
 
-  // Stage 4 – Map Matching (display position only, never used for routing)
-  const snapped = mapMatchDisplay(filtLat, filtLng);
+  // Stage 4 – Adaptive Map Matching (display only)
+  const snapped = mapMatchDisplay(filtLat, filtLng, quality.score, kfSpd);
 
   // Navigation position (routing, off-route, voice)
   navLat = filtLat;
@@ -1365,11 +1601,23 @@ function onGps(pos) {
   userLng = filtLng;
   lastAccuracy = acc;
 
-  // Stage 5 – Smooth Marker Animation target
+  // Stage 5 – Predictive display target
+  // During navigation above minimum speed, extrapolate KF_PREDICT_DT ahead using KF velocity.
+  // This makes the marker appear to move continuously rather than jumping on each GPS fix.
+  // The predicted position is still map-matched (display only). navLat/navLng are never predicted.
   const kfHdg = headingFromKf();
-  const hdg = (rawHdg !== null && !isNaN(rawHdg)) ? rawHdg : (kfHdg !== null ? kfHdg : dispHdg);
-  tgtLat = snapped.lat;
-  tgtLng = snapped.lng;
+  const hdg   = (rawHdg !== null && !isNaN(rawHdg)) ? rawHdg : (kfHdg !== null ? kfHdg : dispHdg);
+
+  if (navActive && kfInitialized && kfSpd > KF_MIN_SPEED_MS) {
+    const predLat     = kfLat.x + kfLat.v * KF_PREDICT_DT;
+    const predLng     = kfLng.x + kfLng.v * KF_PREDICT_DT;
+    const predSnapped = mapMatchDisplay(predLat, predLng, quality.score, kfSpd);
+    tgtLat = predSnapped.lat;
+    tgtLng = predSnapped.lng;
+  } else {
+    tgtLat = snapped.lat;
+    tgtLng = snapped.lng;
+  }
   tgtHdg = hdg;
 
   // Seed display position on first fix so there is no initial jump
@@ -1537,6 +1785,16 @@ async function startNavigation() {
   speedSamples = []; etaSmoothed = 0; currentRouteIdx = 0;
   dispLat = null; dispLng = null; tgtLat = null; tgtLng = null; dispHdg = 0; tgtHdg = 0;
   rejectedCount = 0;
+  arrivalRadiusEnterTime = null;
+  arrivalConfirmed = false;
+  navZoomSmoothed = NAV_ZOOM;
+  headingChangeRate = 0;
+  displayedDistToManeuver = 0;
+  if (map.getSource('route-highlight')) {
+    map.getSource('route-highlight').setData(lineFeature([]));
+    map.setPaintProperty('route-highlight', 'line-opacity', 0.97);
+  }
+  startDistInterpolation();
   if (DIAG_MODE) $('diag').classList.add('visible');
 
   // Remove existing GPS marker — onGps will recreate it as an arrow on next fix
@@ -1573,11 +1831,19 @@ function stopNavigation() {
   lastSpokenStep = -1;
   voiceThresholdsFired = {};
 
-  // Restore full route appearance and clear traffic overlay
+  // Restore full route appearance and clear traffic/highlight overlays
   map.setPaintProperty('route-line',   'line-opacity', 0.95);
   map.setPaintProperty('route-casing', 'line-opacity', 0.9);
   map.getSource('traffic-route').setData({ type: 'FeatureCollection', features: [] });
+  if (map.getSource('route-highlight')) {
+    map.getSource('route-highlight').setData(lineFeature([]));
+    map.setPaintProperty('route-highlight', 'line-opacity', 0.0);
+  }
   offRouteCount = 0;
+  stopDistInterpolation();
+  arrivalRadiusEnterTime = null;
+  navZoomSmoothed = NAV_ZOOM;
+  headingChangeRate = 0;
 
   // Stop filter animation loop and restore dot marker
   stopMarkerAnimation();
@@ -1600,7 +1866,10 @@ function recentre() {
   if (userLat === null) return;
   following = true;
   $('recentre').classList.remove('visible');
-  map.easeTo({ center: [userLng, userLat], zoom: NAV_ZOOM, pitch: is3D ? 55 : NAV_PITCH, bearing: headingSmoothed, duration: 500 });
+  const center = navActive
+    ? cameraLookAheadCenter(userLat, userLng, headingSmoothed, speedFromKf())
+    : [userLng, userLat];
+  map.easeTo({ center, zoom: NAV_ZOOM, pitch: is3D ? 55 : NAV_PITCH, bearing: headingSmoothed, duration: 500 });
 }
 
 function onNavPosition(lat, lng, heading, speed) {
@@ -1610,9 +1879,14 @@ function onNavPosition(lat, lng, heading, speed) {
     : gpsHeadingFromPositions(lat, lng);
   if (bearing !== null) smoothHeading(bearing);
   if (following) {
+    const spd    = speedFromKf();
+    const center = cameraLookAheadCenter(lat, lng, headingSmoothed, spd);
+    // Zoom in slightly during turns for better corner visibility
+    const zTarget   = headingChangeRate > 12 ? NAV_ZOOM + 0.5 : NAV_ZOOM;
+    navZoomSmoothed = navZoomSmoothed * 0.93 + zTarget * 0.07;
     map.easeTo({
-      center: [lng, lat],
-      zoom: NAV_ZOOM,
+      center: center,
+      zoom: navZoomSmoothed,
       pitch: is3D ? 55 : NAV_PITCH,
       bearing: headingSmoothed,
       duration: 650,
@@ -1666,6 +1940,82 @@ async function triggerReroute() {
   }
 }
 
+/* ── Route highlight (next 400m ahead in brighter blue) ────────── */
+function routeHighlightCoords(fromIdx, distM) {
+  if (!routeCoords.length || fromIdx >= routeCoords.length) return [];
+  const coords = [routeCoords[fromIdx]];
+  let accum = 0;
+  for (let i = fromIdx + 1; i < routeCoords.length; i++) {
+    const d = haversine(routeCoords[i-1][0], routeCoords[i-1][1], routeCoords[i][0], routeCoords[i][1]);
+    if (accum + d >= distM) {
+      const t = (distM - accum) / d;
+      coords.push([
+        routeCoords[i-1][0] + t * (routeCoords[i][0] - routeCoords[i-1][0]),
+        routeCoords[i-1][1] + t * (routeCoords[i][1] - routeCoords[i-1][1])
+      ]);
+      break;
+    }
+    accum += d;
+    coords.push(routeCoords[i]);
+  }
+  return coords;
+}
+
+/* ── Smooth maneuver distance interpolation ─────────────────────── */
+function startDistInterpolation() {
+  if (smoothDistTimer) return;
+  smoothDistTimer = setInterval(function() {
+    if (!navActive || displayedDistToManeuver <= 0) return;
+    const now = Date.now();
+    const dt  = (now - lastHudDistMs) / 1000;
+    lastHudDistMs = now;
+    const spd = speedFromKf();
+    if (spd > 0.5) {
+      displayedDistToManeuver = Math.max(0, displayedDistToManeuver - spd * dt);
+      $('nav-distance').textContent = formatDist(displayedDistToManeuver);
+    }
+  }, 250);
+}
+
+function stopDistInterpolation() {
+  if (smoothDistTimer) { clearInterval(smoothDistTimer); smoothDistTimer = null; }
+}
+
+/* ── Arrival detection ──────────────────────────────────────────── */
+function checkArrival(lat, lng, remainDist, progress) {
+  if (!dest || !navActive || arrivalConfirmed) return;
+  const spd        = speedFromKf();
+  const distToDest = haversine(lat, lng, dest.lat, dest.lng);
+  const pct        = routeTotalDistance > 0 ? progress / routeTotalDistance : 0;
+  const near       = distToDest < ARRIVAL_RADIUS_M || remainDist < ARRIVAL_DIST_M || pct > 0.98;
+  if (near) {
+    if (!arrivalRadiusEnterTime) arrivalRadiusEnterTime = Date.now();
+    if (Date.now() - arrivalRadiusEnterTime > ARRIVAL_DWELL_S * 1000 && spd < 3) confirmArrival();
+  } else {
+    arrivalRadiusEnterTime = null;
+  }
+}
+
+function confirmArrival() {
+  if (arrivalConfirmed) return;
+  arrivalConfirmed = true;
+  const destName = (dest && dest.label) || (dest ? dest.lat.toFixed(5) + ', ' + dest.lng.toFixed(5) : 'Destination');
+  addRecentSearch(destName, dest.lat, dest.lng);
+  if (window.speechSynthesis) window.speechSynthesis.cancel();
+  const utt = new SpeechSynthesisUtterance('You have arrived at your destination');
+  utt.lang = 'en-US'; utt.rate = 1.0; utt.volume = 1;
+  let done = false;
+  function finish() {
+    if (done) return; done = true;
+    stopNavigation();
+    if (map.getSource('route'))           map.getSource('route').setData(lineFeature([]));
+    if (map.getSource('route-highlight')) map.getSource('route-highlight').setData(lineFeature([]));
+  }
+  utt.onend = finish;
+  setTimeout(finish, 5000);
+  window.speechSynthesis.speak(utt);
+}
+
 /* ── Canonical navigation state update (single source of truth) ── */
 function syncNavigation(lat, lng) {
   if (!routeCoords.length || !navSteps.length) return;
@@ -1695,8 +2045,12 @@ function syncNavigation(lat, lng) {
   // ── 3. HUD and voice (read from canonical state) ───
   updateHud(displayStep, distToManeuver, remainDist);
   announceNavUpdate(displayStep, distToManeuver);
+  checkArrival(lat, lng, remainDist, progress);
 
-  // ── 4. Traffic-coloured ahead portion ─────────────
+  // ── 4. Traffic-coloured ahead portion + highlight ──
+  if (map.getSource('route-highlight')) {
+    map.getSource('route-highlight').setData(lineFeature(routeHighlightCoords(fromIdx, 400)));
+  }
   const remaining = routeCoords.slice(fromIdx);
   map.getSource('traffic-route').setData({
     type: 'FeatureCollection',
@@ -1722,7 +2076,9 @@ function syncNavigation(lat, lng) {
 function updateHud(stepIdx, distToManeuver, remainDist) {
   const step = navSteps[stepIdx] || { instruction: 'Continue', sign: 0 };
   $('nav-instruction').textContent = step.instruction;
-  $('nav-distance').textContent = formatDist(distToManeuver || 0);
+  displayedDistToManeuver = distToManeuver || 0;
+  lastHudDistMs = Date.now();
+  $('nav-distance').textContent = formatDist(displayedDistToManeuver);
   $('nav-arrow').textContent = arrowForSign(step.sign);
   const left = remainDist !== undefined ? remainDist : routeTotalDistance;
   $('meta-dist').textContent = formatDist(left);
@@ -1794,8 +2150,23 @@ function smoothHeading(heading) {
     sin += Math.sin(h * Math.PI / 180);
     cos += Math.cos(h * Math.PI / 180);
   });
-  headingSmoothed = (Math.atan2(sin, cos) * 180 / Math.PI + 360) % 360;
-  if (navActive) setPill('pill-camera', 'active', Math.round(headingSmoothed) + ' deg');
+  const newSmoothed = (Math.atan2(sin, cos) * 180 / Math.PI + 360) % 360;
+
+  let dh = newSmoothed - headingSmoothed;
+  if (dh >  180) dh -= 360;
+  if (dh < -180) dh += 360;
+
+  // Track heading change rate for turn detection
+  const now = Date.now();
+  if (lastHeadingMs > 0) {
+    const dt = Math.max(0.05, (now - lastHeadingMs) / 1000);
+    headingChangeRate = headingChangeRate * 0.72 + (Math.abs(dh) / dt) * 0.28;
+  }
+  lastHeadingMs = now;
+
+  // Hysteresis: skip micro-jitter below 2°
+  if (Math.abs(dh) > 2 || headingHistory.length <= 2) headingSmoothed = newSmoothed;
+  if (navActive) setPill('pill-camera', 'active', Math.round(headingSmoothed) + '°');
 }
 
 /* ── Geometry helpers ──────────────────────────────── */
@@ -1814,7 +2185,7 @@ function pointToSegmentDist(lat, lng, p0, p1) {
 
 /* ── Traffic route coloring ────────────────────────── */
 function ratioToTrafficColor(ratio) {
-  if (ratio > 0.75) return '#4f8ef7'; // free  — blue
+  if (ratio > 0.75) return '#3e82e0'; // free  — slightly darker blue (highlight zone is brighter)
   if (ratio > 0.45) return '#f1c40f'; // slow  — yellow
   return '#e74c3c';                   // jam   — red
 }
