@@ -241,9 +241,16 @@
   #recentre.visible { display: flex; }
 
   /* ── Markers ─────────────────────────────────────── */
+  .gps-dot {
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 3px solid #fff;
+    box-shadow: 0 0 0 4px rgba(79,142,247,0.35);
+  }
   .gps-arrow-wrap {
     filter: drop-shadow(0 2px 5px rgba(0,0,0,0.45));
-    line-height: 0; /* collapse whitespace around SVG */
+    line-height: 0;
   }
   .pin {
     width: 22px; height: 22px;
@@ -604,6 +611,10 @@ let speedSamples   = [];        // { speed (m/s), time (ms) }
 let etaSmoothed    = 0;
 let currentRouteIdx = 0;        // updated in syncNavigation, read by updateHud
 
+// ── Navigation state machine ──────────────────────────────────────────────────
+let isRerouting    = false;     // true while async reroute fetch is in-flight
+let gpsMarkerIsArrow = false;   // tracks which type of GPS marker is currently shown
+
 // Voice state
 let voiceMuted = false;
 let lastSpokenStep = -1;
@@ -680,27 +691,30 @@ function stopIosTtsKeepalive() {
   iosTtsTimer = null;
 }
 
-function announceNavUpdate(stepIdx, progress) {
-  if (!navSteps.length) return;
-  const step = navSteps[stepIdx];
+// displayStep = the upcoming maneuver the user is approaching
+// distToManeuver = metres to that maneuver's trigger point
+function announceNavUpdate(displayStep, distToManeuver) {
+  if (isRerouting || !navSteps.length) return;
+  const step = navSteps[displayStep];
   if (!step) return;
 
-  if (stepIdx !== lastSpokenStep) {
-    lastSpokenStep = stepIdx;
+  // Step changed → announce new instruction immediately (once per step)
+  if (displayStep !== lastSpokenStep) {
+    lastSpokenStep = displayStep;
     voiceThresholdsFired = {};
-    const isArrival = stepIdx === navSteps.length - 1;
+    const isArrival = displayStep === navSteps.length - 1;
     speak(isArrival ? 'You have arrived at your destination' : step.instruction);
     return;
   }
 
-  const next = navSteps[stepIdx + 1];
-  if (!next) return;
-  const distToNext = Math.max(0, next.distFromStart - progress);
+  // Advance distance warnings for the CURRENT upcoming maneuver
   [500, 200].forEach(function(threshold) {
-    if (distToNext > 0 && distToNext <= threshold && !voiceThresholdsFired[threshold]) {
+    if (distToManeuver > 0 && distToManeuver <= threshold && !voiceThresholdsFired[threshold]) {
       voiceThresholdsFired[threshold] = true;
-      const distStr = threshold < 1000 ? threshold + ' metres' : (threshold / 1000) + ' kilometres';
-      speak('In ' + distStr + ', ' + next.instruction);
+      // Use actual distance in speech, rounded to nearest 50m
+      const d = Math.round(distToManeuver / 50) * 50;
+      const distStr = d >= 1000 ? (d / 1000).toFixed(1) + ' kilometres' : d + ' metres';
+      speak('In ' + distStr + ', ' + step.instruction);
     }
   });
 }
@@ -941,7 +955,7 @@ function markerAnimFrame() {
 
   if (gpsMarker) {
     gpsMarker.setLngLat([dispLng, dispLat]);
-    gpsMarker.setRotation(dispHdg);
+    if (gpsMarkerIsArrow) gpsMarker.setRotation(dispHdg);
   }
 
   markerRafId = requestAnimationFrame(markerAnimFrame);
@@ -1073,6 +1087,14 @@ function addRouteSources() {
     paint: { 'line-color': '#4f8ef7', 'line-width': 5, 'line-opacity': 0.95 } });
 
   map.addSource('traffic-route', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+  // White casing beneath traffic colors so blue/yellow/red are legible over any map background
+  map.addLayer({
+    id: 'traffic-route-casing',
+    type: 'line',
+    source: 'traffic-route',
+    layout: { 'line-join': 'round', 'line-cap': 'round' },
+    paint: { 'line-color': '#ffffff', 'line-width': 11, 'line-opacity': 0.95 }
+  });
   map.addLayer({
     id: 'traffic-route',
     type: 'line',
@@ -1080,8 +1102,8 @@ function addRouteSources() {
     layout: { 'line-join': 'round', 'line-cap': 'round' },
     paint: {
       'line-color': ['coalesce', ['get', 'color'], '#4f8ef7'],
-      'line-width': 6,
-      'line-opacity': 0.95
+      'line-width': 7,
+      'line-opacity': 0.97
     }
   });
 }
@@ -1237,15 +1259,21 @@ const GPS_ARROW_SVG =
     '<circle cx="14" cy="14" r="2.5" fill="white" opacity="0.55"/>' +
   '</svg>';
 
-function makeGpsMarker(lng, lat) {
+function makeGpsDot(lng, lat) {
+  const el = document.createElement('div');
+  el.className = 'gps-dot';
+  return new maplibregl.Marker({ element: el }).setLngLat([lng, lat]).addTo(map);
+}
+
+function makeGpsArrow(lng, lat) {
   const el = document.createElement('div');
   el.className = 'gps-arrow-wrap';
   el.innerHTML = GPS_ARROW_SVG;
   return new maplibregl.Marker({
     element: el,
     rotation: 0,
-    rotationAlignment: 'map',   // rotation degrees are relative to north on the map
-    pitchAlignment: 'viewport'  // stays upright when 3D pitch is applied
+    rotationAlignment: 'map',
+    pitchAlignment: 'viewport'
   }).setLngLat([lng, lat]).addTo(map);
 }
 
@@ -1351,9 +1379,16 @@ function onGps(pos) {
     dispHdg = hdg;
   }
 
-  // Ensure marker exists and animation loop is running
-  if (!gpsMarker) {
-    gpsMarker = makeGpsMarker(dispLng, dispLat);
+  // Ensure correct marker type: dot outside navigation, arrow during navigation
+  if (!gpsMarker || gpsMarkerIsArrow !== navActive) {
+    if (gpsMarker) gpsMarker.remove();
+    if (navActive) {
+      gpsMarker = makeGpsArrow(dispLng, dispLat);
+      gpsMarkerIsArrow = true;
+    } else {
+      gpsMarker = makeGpsDot(dispLng, dispLat);
+      gpsMarkerIsArrow = false;
+    }
   }
   startMarkerAnimation();
 
@@ -1492,18 +1527,20 @@ async function startNavigation() {
   // Fade full route so only traffic-colored ahead portion dominates
   map.setPaintProperty('route-line',   'line-opacity', 0.18);
   map.setPaintProperty('route-casing', 'line-opacity', 0.18);
-  // Reset traffic + off-route state; trigger immediate fetch on first syncNavigation
+  // Reset all navigation state for new trip
   lastTrafficRouteUpdate = 0;
   offRouteCount = 0;
   lastOffRouteWarnTime = 0;
-
-  // Reset navigation filter state for new trip
+  isRerouting = false;
   kfInitialized = false; kfUpdateCount = 0; kfLat = null; kfLng = null;
   lastRawFix = null;
   speedSamples = []; etaSmoothed = 0; currentRouteIdx = 0;
   dispLat = null; dispLng = null; tgtLat = null; tgtLng = null; dispHdg = 0; tgtHdg = 0;
   rejectedCount = 0;
   if (DIAG_MODE) $('diag').classList.add('visible');
+
+  // Remove existing GPS marker — onGps will recreate it as an arrow on next fix
+  if (gpsMarker) { gpsMarker.remove(); gpsMarker = null; gpsMarkerIsArrow = false; }
 
   // Voice — called from button click, safe on iOS
   lastSpokenStep = -1;
@@ -1542,8 +1579,15 @@ function stopNavigation() {
   map.getSource('traffic-route').setData({ type: 'FeatureCollection', features: [] });
   offRouteCount = 0;
 
-  // Stop filter animation loop
+  // Stop filter animation loop and restore dot marker
   stopMarkerAnimation();
+  isRerouting = false;
+  offRouteCount = 0;
+  if (gpsMarker) { gpsMarker.remove(); gpsMarker = null; }
+  if (dispLat !== null) {
+    gpsMarker = makeGpsDot(dispLng, dispLat);
+    gpsMarkerIsArrow = false;
+  }
   $('diag').classList.remove('visible');
 
   map.easeTo({ pitch: is3D ? 45 : 0, bearing: 0, duration: 700 });
@@ -1578,41 +1622,97 @@ function onNavPosition(lat, lng, heading, speed) {
   syncNavigation(lat, lng);
 }
 
+/* ── Rerouting ─────────────────────────────────────── */
+async function triggerReroute() {
+  if (isRerouting || !navLat || !dest) return;
+  isRerouting = true;
+  offRouteCount = 0;
+  speak('Rerouting');
+  setPill('pill-camera', 'active', 'REROUTING');
+
+  const url = 'https://graphhopper.com/api/1/route?point=' + navLat + ',' + navLng +
+    '&point=' + dest.lat + ',' + dest.lng +
+    '&vehicle=car&locale=en&points_encoded=false&instructions=true&calc_points=true&key=' + GH_KEY;
+
+  try {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('GraphHopper ' + r.status);
+    const data = await r.json();
+    const path = data.paths && data.paths[0];
+    if (!path || !path.points) throw new Error('No route');
+
+    routeCoords           = path.points.coordinates.map(function(c) { return [c[1], c[0]]; });
+    routeTotalDistance    = path.distance || polylineLength(routeCoords);
+    routeTotalTimeSecs    = path.time ? path.time / 1000 : 0;
+    navSteps              = extractSteps(path);
+    navStep               = 0;   // will be recomputed on next syncNavigation
+    currentRouteIdx       = 0;
+    trafficColors         = [];
+    lastTrafficRouteUpdate = 0;
+    etaSmoothed           = 0;
+    lastSpokenStep        = -1;  // causes next sync to announce step 1
+    voiceThresholdsFired  = {};
+
+    map.getSource('route').setData(lineFeature(routeCoords));
+    map.getSource('traffic-route').setData({ type: 'FeatureCollection', features: [] });
+
+    isRerouting = false;
+    setPill('pill-camera', 'active', 'HEADING-UP');
+  } catch (e) {
+    isRerouting = false;
+    toast('Rerouting failed — check connection');
+    setPill('pill-camera', 'active', 'HEADING-UP');
+    dbg('Reroute: ' + e.message);
+  }
+}
+
+/* ── Canonical navigation state update (single source of truth) ── */
 function syncNavigation(lat, lng) {
   if (!routeCoords.length || !navSteps.length) return;
-  const closest = findClosestRoutePoint(lat, lng);
-  const remaining = routeCoords.slice(closest.closestIdx);
-  currentRouteIdx = closest.closestIdx; // ETA engine reads this
+  if (isRerouting) return; // hold until async reroute resolves
 
-  // Update traffic-colored ahead portion
+  // ── 1. Position along route ────────────────────────
+  const closest  = findClosestRoutePoint(lat, lng);
+  const fromIdx  = closest.closestIdx;
+  currentRouteIdx = fromIdx;
+  const progress  = polylineLength(routeCoords.slice(0, fromIdx + 1));
+  const remainDist = polylineLength(routeCoords.slice(fromIdx));
+
+  // ── 2. Maneuver index — monotonically advancing ────
+  // Find the last step whose trigger point has been passed (or is ≤10m ahead).
+  // Using +10 avoids showing "0 m" in the HUD right before a turn.
+  let completedIdx = -1;
+  for (let i = 0; i < navSteps.length; i++) {
+    if (navSteps[i].distFromStart <= progress + 10) completedIdx = i;
+  }
+  // displayStep = the NEXT upcoming maneuver (what to do NEXT, not what was just done)
+  const rawDisplayStep = Math.min(completedIdx + 1, navSteps.length - 1);
+  // Clamp: navStep can only advance, never go backward — prevents voice double-fire on GPS bounce
+  navStep = Math.max(navStep, rawDisplayStep);
+  const displayStep    = navStep;
+  const distToManeuver = Math.max(0, navSteps[displayStep].distFromStart - progress);
+
+  // ── 3. HUD and voice (read from canonical state) ───
+  updateHud(displayStep, distToManeuver, remainDist);
+  announceNavUpdate(displayStep, distToManeuver);
+
+  // ── 4. Traffic-coloured ahead portion ─────────────
+  const remaining = routeCoords.slice(fromIdx);
   map.getSource('traffic-route').setData({
     type: 'FeatureCollection',
-    features: buildColoredFeatures(remaining, closest.closestIdx)
+    features: buildColoredFeatures(remaining, fromIdx)
   });
-
-  // Throttled traffic color refresh (every TRAFFIC_REFRESH_MS)
   if (Date.now() - lastTrafficRouteUpdate > TRAFFIC_REFRESH_MS) {
     lastTrafficRouteUpdate = Date.now();
-    fetchAndUpdateTrafficColors(closest.closestIdx);
+    fetchAndUpdateTrafficColors(fromIdx);
   }
 
-  const progress = polylineLength(routeCoords.slice(0, closest.closestIdx + 1));
-  for (let i = 0; i < navSteps.length; i++) {
-    if (navSteps[i].distFromStart <= progress + 10) navStep = Math.min(i, navSteps.length - 1);
-  }
-  const next = navSteps[navStep] || { instruction: 'Continue', distFromStart: progress };
-  const distToManeuver = Math.max(0, next.distFromStart - progress);
-  const remainDist = polylineLength(remaining);
-  updateHud(navStep, distToManeuver, remainDist);
-  announceNavUpdate(navStep, progress);
-
-  // Off-route: accuracy-aware threshold + must see 5 consecutive bad readings + 2 min cooldown
+  // ── 5. Off-route → reroute ─────────────────────────
   const threshold = lastAccuracy ? Math.max(50, lastAccuracy * 1.5) : 50;
   if (closest.distToRoute > threshold) {
     offRouteCount++;
-    if (offRouteCount >= 5 && Date.now() - lastOffRouteWarnTime > 120000) {
-      lastOffRouteWarnTime = Date.now();
-      toast('Possible off route — recalculate if needed');
+    if (offRouteCount >= 5 && !isRerouting) {
+      triggerReroute(); // async — sets isRerouting=true synchronously
     }
   } else {
     offRouteCount = 0;
