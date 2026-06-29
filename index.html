@@ -1767,10 +1767,19 @@ function setDest(lat, lng, label) {
 
 /* ── GPS ───────────────────────────────────────────── */
 function startGps() {
+  const host = window.location && window.location.hostname;
+  const isLocalHost = host === 'localhost' || host === '127.0.0.1' || host === '::1';
+  if (window.isSecureContext === false && !isLocalHost) {
+    setPill('pill-gps', 'err', 'HTTPS REQUIRED');
+    $('origin-gps').classList.remove('active');
+    toast('GPS requires HTTPS on mobile. Use GitHub Pages or another HTTPS host.');
+    dbg('GPS blocked: insecure context ' + window.location.href);
+    return;
+  }
   if (!navigator.geolocation) { setPill('pill-gps', 'err', 'NO GEOLOCATION'); return; }
   setPill('pill-gps', 'active', 'LOCATING');
   if (gpsWatchId === null) {
-    gpsWatchId = navigator.geolocation.watchPosition(onGps, onGpsError, GPS_WATCH_OPTIONS);
+    gpsWatchId = navigator.geolocation.watchPosition(safeOnGps, onGpsError, GPS_WATCH_OPTIONS);
   }
   if (gpsPollTimer === null) {
     pollGpsOnce();
@@ -1782,10 +1791,21 @@ function pollGpsOnce() {
   if (!navigator.geolocation || gpsPollInFlight) return;
   gpsPollInFlight = true;
   navigator.geolocation.getCurrentPosition(
-    function(pos) { gpsPollInFlight = false; onGps(pos); },
+    function(pos) { gpsPollInFlight = false; safeOnGps(pos); },
     function(err) { gpsPollInFlight = false; onGpsError(err); },
     { enableHighAccuracy: true, maximumAge: 0, timeout: GPS_TIMEOUT_MS }
   );
+}
+
+function safeOnGps(pos) {
+  try {
+    onGps(pos);
+  } catch (e) {
+    setPill('pill-gps', 'err', 'GPS HANDLER ERROR');
+    $('origin-gps').classList.remove('active');
+    dbg('GPS handler error: ' + (e && e.message ? e.message : e));
+    console.error('GPS handler error:', e);
+  }
 }
 
 function onGps(pos) {
@@ -1855,6 +1875,8 @@ function onGps(pos) {
   }
 
   // Stage 4 – Adaptive Map Matching (display only)
+  const kfHdg = headingFromKf();
+  const hdg   = (rawHdg !== null && !isNaN(rawHdg)) ? rawHdg : (kfHdg !== null ? kfHdg : dispHdg);
   const snapped = mapMatchDisplay(filtLat, filtLng, quality.score, kfSpd, hdg);
 
   // Navigation position (routing, off-route, voice)
@@ -1868,9 +1890,6 @@ function onGps(pos) {
   // During navigation above minimum speed, extrapolate KF_PREDICT_DT ahead using KF velocity.
   // This makes the marker appear to move continuously rather than jumping on each GPS fix.
   // The predicted position is still map-matched (display only). navLat/navLng are never predicted.
-  const kfHdg = headingFromKf();
-  const hdg   = (rawHdg !== null && !isNaN(rawHdg)) ? rawHdg : (kfHdg !== null ? kfHdg : dispHdg);
-
   if (navActive && kfInitialized && kfSpd > KF_MIN_SPEED_MS) {
     const predLat     = kfLat.x + kfLat.v * KF_PREDICT_DT;
     const predLng     = kfLng.x + kfLng.v * KF_PREDICT_DT;
@@ -2683,7 +2702,7 @@ function handleAppForeground() {
 function restartGpsWatch() {
   if (gpsWatchId !== null) { navigator.geolocation.clearWatch(gpsWatchId); gpsWatchId = null; }
   if (gpsPollTimer !== null) { clearInterval(gpsPollTimer); gpsPollTimer = null; }
-  gpsWatchId   = navigator.geolocation.watchPosition(onGps, onGpsError, GPS_WATCH_OPTIONS);
+  gpsWatchId   = navigator.geolocation.watchPosition(safeOnGps, onGpsError, GPS_WATCH_OPTIONS);
   gpsPollTimer = setInterval(pollGpsOnce, GPS_POLL_MS);
   pollGpsOnce();
   if (navActive) {
