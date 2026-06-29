@@ -567,6 +567,14 @@ const SEARCH_DEBOUNCE_MS = 300;
 const SEARCH_MIN_CHARS   = 3;
 const SEARCH_CACHE_SIZE  = 50;
 
+// ── v1.4 additions ───────────────────────────────────────────────────────────
+const DIAG_LOG_ENABLED    = false;  // set true to save a JSON telemetry file per navigation
+const MM_HIGHWAY_SPEED_MS = 13.9;   // ~50 km/h — highway map-matching continuity threshold
+const GPS_STALE_MS        = 8000;   // ms without GPS before background recovery kicks in
+const VOICE_CONT_MIN_M    = 500;    // skip "Continue on…" announcement if next turn is closer
+const ETA_SMOOTH_MOVING   = 0.06;   // ETA smoothing alpha while moving
+const ETA_SMOOTH_STOPPED  = 0.015;  // ETA smoothing alpha at stops (very stable)
+
 let map;
 let gpsMarker = null;
 let accuracySourceReady = false;
@@ -662,7 +670,29 @@ let recentSearches = [];   // last-picked places
 let voiceMuted = false;
 let lastSpokenStep = -1;
 let voiceThresholdsFired = {};
+let voiceContinueAnnounced = false; // per-step: "Continue on X" already said
 let iosTtsTimer = null;
+
+// ── Continuous route progress (feature 5) ────────────────────────────────────
+let continuousProgress   = 0;        // monotonically-increasing progress along route (m)
+let lastProgressUpdateMs = 0;        // timestamp of last progress update
+let lastDisplayedStepIdx = -1;       // detects step transitions in updateHud
+
+// ── Background recovery (feature 6) ──────────────────────────────────────────
+let lastGpsUpdateTime       = 0;     // timestamp of last accepted onGps() call
+let foregroundRecoveryTimer = null;
+let gpsReacquisitionCount   = 0;
+
+// ── Map matching (feature 1) ──────────────────────────────────────────────────
+let lastMatchedSegIdx = -1;          // segment index from last successful snap
+let lastQualityScore  = 50;          // last GPS quality score (for diagnostics)
+
+// ── Per-segment TomTom speeds (feature 2) ────────────────────────────────────
+let trafficSpeeds = [];              // m/s per routeCoords index from TomTom flow API
+
+// ── Navigation diagnostics (feature 7) ───────────────────────────────────────
+let diagLog           = null;
+let diagTelemetryTimer = null;
 
 function $(id) { return document.getElementById(id); }
 
@@ -721,6 +751,7 @@ function speak(text) {
   utt.rate = 1.0;
   utt.volume = 1;
   window.speechSynthesis.speak(utt);
+  diagLogEvent('VoicePrompt', { text: text });
 }
 
 function startIosTtsKeepalive() {
@@ -741,20 +772,36 @@ function announceNavUpdate(displayStep, distToManeuver) {
   const step = navSteps[displayStep];
   if (!step) return;
 
-  // Step changed → announce new instruction immediately (once per step)
+  const isArrival = displayStep === navSteps.length - 1;
+
+  // Step changed → calm handoff announcement
   if (displayStep !== lastSpokenStep) {
     lastSpokenStep = displayStep;
     voiceThresholdsFired = {};
-    const isArrival = displayStep === navSteps.length - 1;
-    speak(isArrival ? 'You have arrived at your destination' : step.instruction);
+    voiceContinueAnnounced = false;
+
+    if (isArrival) { speak('You have arrived at your destination'); return; }
+
+    if (distToManeuver > VOICE_CONT_MIN_M) {
+      // Next turn is far away — say "Continue on <road> for X" then go quiet
+      const road = step.streetName || '';
+      const d    = distToManeuver;
+      const ds   = d >= 1000 ? (d / 1000).toFixed(1) + ' kilometres'
+                             : (Math.round(d / 100) * 100) + ' metres';
+      speak('Continue' + (road ? ' on ' + road : '') + ' for ' + ds);
+      voiceContinueAnnounced = true;
+      return;
+    }
+
+    // Consecutive close maneuvers — existing immediate announcement
+    speak(step.instruction);
     return;
   }
 
-  // Advance distance warnings for the CURRENT upcoming maneuver
+  // Advance distance warnings (resume guidance at 500 m and 200 m)
   [500, 200].forEach(function(threshold) {
     if (distToManeuver > 0 && distToManeuver <= threshold && !voiceThresholdsFired[threshold]) {
       voiceThresholdsFired[threshold] = true;
-      // Use actual distance in speech, rounded to nearest 50m
       const d = Math.round(distToManeuver / 50) * 50;
       const distStr = d >= 1000 ? (d / 1000).toFixed(1) + ' kilometres' : d + ' metres';
       speak('In ' + distStr + ', ' + step.instruction);
@@ -967,37 +1014,76 @@ function checkOutlier(rawLat, rawLng, acc, now) {
 }
 
 /* ── 4. Map Matching (display only) ──────────────────*/
-// confidence 0-100, speedMs in m/s.
-// Snap threshold adapts: tighter at high confidence/low speed, looser otherwise.
-// Search starts from currentRouteIdx to never snap backwards onto completed segments.
-function mapMatchDisplay(filtLat, filtLng, confidence, speedMs) {
+// Multi-factor scoring: distance, heading alignment, GPS confidence, continuity.
+// At highway speeds (>MM_HIGHWAY_SPEED_MS) a strong continuity bonus keeps the
+// arrow locked to the previously matched carriageway segment.
+function mapMatchDisplay(filtLat, filtLng, confidence, speedMs, heading) {
   if (!navActive || !routeCoords.length) return { lat: filtLat, lng: filtLng };
 
-  // Adaptive threshold: 15 m (perfect) → 50 m (poor conf + high speed)
-  const confFactor = 1 - Math.max(0, Math.min(100, confidence || 0)) / 100;
-  const spdFactor  = Math.min(1, (speedMs || 0) / 20);
-  const snapDist   = 15 + confFactor * 20 + spdFactor * 15;
+  const isHighSpeed = (speedMs || 0) > MM_HIGHWAY_SPEED_MS;
+  const startIdx    = Math.max(0, currentRouteIdx - 2);
 
-  // Small backward buffer (−2 segments) to tolerate brief closestIdx oscillation
-  const startIdx = Math.max(0, currentRouteIdx - 2);
+  let bestScore    = -Infinity;
+  let bestIdx      = startIdx;
+  let bestProjLat  = filtLat;
+  let bestProjLng  = filtLng;
+  let bestPerpDist = Infinity;
 
-  let bestDist = Infinity, snapLat = filtLat, snapLng = filtLng;
   for (let i = startIdx; i < routeCoords.length - 1; i++) {
-    const p0 = routeCoords[i], p1 = routeCoords[i + 1];
+    const p0     = routeCoords[i], p1 = routeCoords[i + 1];
     const cosLat = Math.cos(filtLat * Math.PI / 180);
-    const x  = (filtLng - p0[1]) * cosLat * 111320;
-    const y  = (filtLat - p0[0]) * 111320;
-    const dx = (p1[1]  - p0[1]) * cosLat * 111320;
-    const dy = (p1[0]  - p0[0]) * 111320;
-    const lenSq = dx * dx + dy * dy;
-    const t = lenSq > 0 ? Math.max(0, Math.min(1, (x*dx + y*dy) / lenSq)) : 0;
-    const pLat = p0[0] + t * (p1[0] - p0[0]);
-    const pLng = p0[1] + t * (p1[1] - p0[1]);
-    const d = haversine(filtLat, filtLng, pLat, pLng);
-    if (d < bestDist) { bestDist = d; snapLat = pLat; snapLng = pLng; }
+    const x      = (filtLng - p0[1]) * cosLat * 111320;
+    const y      = (filtLat - p0[0]) * 111320;
+    const dx     = (p1[1]  - p0[1]) * cosLat * 111320;
+    const dy     = (p1[0]  - p0[0]) * 111320;
+    const lenSq  = dx * dx + dy * dy;
+    const t      = lenSq > 0 ? Math.max(0, Math.min(1, (x*dx + y*dy) / lenSq)) : 0;
+    const pLat   = p0[0] + t * (p1[0] - p0[0]);
+    const pLng   = p0[1] + t * (p1[1] - p0[1]);
+    const perp   = haversine(filtLat, filtLng, pLat, pLng);
+
+    // 1. Perpendicular distance — exponential decay, 25 m reference
+    const distScore = Math.exp(-perp / 25) * 100;
+
+    // 2. Heading alignment — prefer segments aligned with vehicle heading
+    let hdgScore = 60;
+    if (heading !== null && !isNaN(heading) && lenSq > 0) {
+      const segHdg = (Math.atan2(dx, dy) * 180 / Math.PI + 360) % 360;
+      let diff = Math.abs(heading - segHdg);
+      if (diff > 180) diff = 360 - diff;
+      hdgScore = Math.max(0, 100 - diff * 1.2);
+    }
+
+    // 3. Continuity — strongly reward staying on previously matched segment
+    let contBonus = 0;
+    if (lastMatchedSegIdx >= 0) {
+      const d = Math.abs(i - lastMatchedSegIdx);
+      if (d === 0) contBonus = isHighSpeed ? 80 : 40;
+      else if (d === 1) contBonus = isHighSpeed ? 45 : 18;
+      else if (d === 2) contBonus = isHighSpeed ? 18 : 5;
+    }
+
+    // 4. GPS confidence scales the distance term
+    const confFactor = 0.5 + Math.max(0, Math.min(100, confidence || 50)) / 200;
+
+    const score = distScore * confFactor * 0.45 + hdgScore * 0.25 + contBonus * 0.30;
+
+    if (score > bestScore) {
+      bestScore    = score;
+      bestIdx      = i;
+      bestProjLat  = pLat;
+      bestProjLng  = pLng;
+      bestPerpDist = perp;
+    }
   }
 
-  if (bestDist <= snapDist) return { lat: snapLat, lng: snapLng };
+  // Apply snap — at highway speed also snap up to 60 m if we have a prior match
+  const maxSnap = isHighSpeed ? 35 : (15 + (1 - Math.min(1, (confidence || 50) / 100)) * 35);
+  if (bestPerpDist <= maxSnap || (isHighSpeed && lastMatchedSegIdx >= 0 && bestPerpDist <= 60)) {
+    lastMatchedSegIdx = bestIdx;
+    return { lat: bestProjLat, lng: bestProjLng };
+  }
+  lastMatchedSegIdx = -1;
   return { lat: filtLat, lng: filtLng };
 }
 
@@ -1056,6 +1142,20 @@ function rollingSpeedMs() {
   return moving.reduce(function(a, b) { return a + b.speed; }, 0) / moving.length;
 }
 
+// Returns GraphHopper-implied speed (m/s) for the step containing routeIdx.
+// Serves as a road-speed-limit proxy when TomTom data is unavailable.
+function getStepBaseSpeedMs(routeIdx) {
+  for (let s = 0; s < navSteps.length; s++) {
+    const step = navSteps[s];
+    const s0 = step.interval[0], s1 = step.interval[1];
+    if (routeIdx >= s0 && routeIdx <= s1 && step.timeSecs > 0 && step.distance > 10) {
+      return step.distance / step.timeSecs;
+    }
+  }
+  return (routeTotalTimeSecs > 0 && routeTotalDistance > 0)
+    ? routeTotalDistance / routeTotalTimeSecs : 10;
+}
+
 function trafficMultiplier(fromIdx) {
   if (!trafficColors.length) return 1.0;
   const ahead = trafficColors.slice(fromIdx);
@@ -1065,19 +1165,41 @@ function trafficMultiplier(fromIdx) {
   return 1 + (slow * 0.20 + jam * 0.50) / ahead.length;
 }
 
+// Segment-based ETA: sums per-segment travel time using
+//   1. TomTom live speed  2. GH step-implied speed  3. historical drive average
+// Instantaneous speed is NOT used directly — prevents ETA spikes at stops.
 function computeEta(remainingM, fromIdx) {
-  if (!routeTotalDistance || !routeTotalTimeSecs) return 0;
-  const baseline = routeTotalTimeSecs * (remainingM / routeTotalDistance);
-  if (baseline <= 0) return 0;
+  if (remainingM <= 0) return 0;
+  const isStopped   = speedFromKf() < 1.5;
+  const histSpeedMs = rollingSpeedMs();
 
-  const spd = rollingSpeedMs();
-  const speedBased = spd ? remainingM / spd : baseline;
-  const tMult = trafficMultiplier(fromIdx);
-  const blended = ((1 - ETA_BLEND_ALPHA) * baseline + ETA_BLEND_ALPHA * speedBased) * tMult;
+  let segTime = 0;
+  for (let i = fromIdx; i < routeCoords.length - 1; i++) {
+    const d = haversine(routeCoords[i][0], routeCoords[i][1],
+                        routeCoords[i+1][0], routeCoords[i+1][1]);
+    if (d < 0.1) continue;
+    const ttSpd   = trafficSpeeds[i];            // TomTom live speed in m/s, or null
+    const ghSpd   = getStepBaseSpeedMs(i);        // road-speed-limit proxy
+    let spd;
+    if (ttSpd && ttSpd > 1) {
+      spd = ttSpd;                               // Priority 1 — TomTom live
+    } else if (histSpeedMs && histSpeedMs > 1) {
+      spd = ghSpd * 0.5 + histSpeedMs * 0.5;    // Priority 2 — blend road + historical
+    } else {
+      spd = ghSpd;                               // Priority 3 — GH baseline
+    }
+    segTime += d / Math.max(1, spd);
+  }
 
-  // Smooth — initialise on first call per trip
-  if (etaSmoothed === 0) { etaSmoothed = blended; return blended; }
-  etaSmoothed = etaSmoothed * (1 - ETA_SMOOTH_ALPHA) + blended * ETA_SMOOTH_ALPHA;
+  if (segTime <= 0) {
+    const fill = histSpeedMs || Math.max(3, routeTotalDistance / Math.max(1, routeTotalTimeSecs));
+    segTime = remainingM / fill;
+  }
+
+  // Smooth — use a very low alpha while stopped to suppress traffic-light spikes
+  const alpha = isStopped ? ETA_SMOOTH_STOPPED : ETA_SMOOTH_MOVING;
+  if (etaSmoothed === 0) { etaSmoothed = segTime; return segTime; }
+  etaSmoothed = etaSmoothed * (1 - alpha) + segTime * alpha;
   return etaSmoothed;
 }
 
@@ -1173,18 +1295,18 @@ function initMap() {
 function addRouteSources() {
   map.addSource('route', geojsonSource(lineFeature([])));
   map.addLayer({ id: 'route-casing', type: 'line', source: 'route',
-    paint: { 'line-color': '#0b0d12', 'line-width': 9, 'line-opacity': 0.9 } });
+    paint: { 'line-color': '#080a0f', 'line-width': 12, 'line-opacity': 0.9 } });
   map.addLayer({ id: 'route-line', type: 'line', source: 'route',
-    paint: { 'line-color': '#4f8ef7', 'line-width': 5, 'line-opacity': 0.95 } });
+    paint: { 'line-color': '#4f8ef7', 'line-width': 6, 'line-opacity': 0.95 } });
 
   map.addSource('traffic-route', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
-  // White casing beneath traffic colors so blue/yellow/red are legible over any map background
+  // Wider white casing keeps active route dominant over traffic tiles
   map.addLayer({
     id: 'traffic-route-casing',
     type: 'line',
     source: 'traffic-route',
     layout: { 'line-join': 'round', 'line-cap': 'round' },
-    paint: { 'line-color': '#ffffff', 'line-width': 13, 'line-opacity': 0.95 }
+    paint: { 'line-color': '#ffffff', 'line-width': 17, 'line-opacity': 0.97 }
   });
   map.addLayer({
     id: 'traffic-route',
@@ -1193,19 +1315,19 @@ function addRouteSources() {
     layout: { 'line-join': 'round', 'line-cap': 'round' },
     paint: {
       'line-color': ['coalesce', ['get', 'color'], '#3e82e0'],
-      'line-width': 8,
-      'line-opacity': 0.97
+      'line-width': 10,
+      'line-opacity': 0.98
     }
   });
 
-  // Bright-blue highlight for the next 400m — sits on top of traffic-route
+  // Bright-blue highlight for the next 500 m — sits on top of traffic-route
   map.addSource('route-highlight', { type: 'geojson', data: lineFeature([]) });
   map.addLayer({
     id: 'route-highlight',
     type: 'line',
     source: 'route-highlight',
     layout: { 'line-join': 'round', 'line-cap': 'round' },
-    paint: { 'line-color': '#72c0ff', 'line-width': 8, 'line-opacity': 0.0 }
+    paint: { 'line-color': '#80d4ff', 'line-width': 10, 'line-opacity': 0.0 }
   });
 }
 
@@ -1598,11 +1720,11 @@ function bindSearch(kind) {
 // Navigation arrow SVG — tip at top (north = heading 0°).
 // Outer white path gives the halo; inner blue path is the arrow body.
 const GPS_ARROW_SVG =
-  '<svg xmlns="http://www.w3.org/2000/svg" width="28" height="38" viewBox="0 0 28 38">' +
-    '<path d="M14 0 L28 37 L14 28 L0 37 Z" fill="rgba(0,0,0,0.45)"/>' +
-    '<path d="M14 1 L27 36 L14 27 L1 36 Z" fill="white" opacity="0.95"/>' +
-    '<path d="M14 4 L25 33 L14 24.5 L3 33 Z" fill="#4f8ef7"/>' +
-    '<circle cx="14" cy="14" r="2.5" fill="white" opacity="0.55"/>' +
+  '<svg xmlns="http://www.w3.org/2000/svg" width="30" height="40" viewBox="0 0 30 40">' +
+    '<path d="M15 0 L30 39 L15 29 L0 39 Z" fill="rgba(0,0,0,0.72)"/>' +
+    '<path d="M15 1 L28 37 L15 27 L2 37 Z" fill="white" opacity="0.98"/>' +
+    '<path d="M15 4 L26 34 L15 25 L4 34 Z" fill="#4f8ef7"/>' +
+    '<circle cx="15" cy="14" r="2.5" fill="white" opacity="0.65"/>' +
   '</svg>';
 
 function makeGpsDot(lng, lat) {
@@ -1673,9 +1795,11 @@ function onGps(pos) {
   const rawSpd  = pos.coords.speed     !== null ? pos.coords.speed : 0;
   const rawHdg  = pos.coords.heading;
   const now     = Date.now();
+  lastGpsUpdateTime = now;
 
   // Stage 1 – Quality Assessment
   const quality = scoreGpsQuality(rawLat, rawLng, acc, rawSpd, rawHdg, now);
+  lastQualityScore = quality.score;
 
   // Stage 2 – Outlier Rejection
   const chk = checkOutlier(rawLat, rawLng, acc, now);
@@ -1713,6 +1837,7 @@ function onGps(pos) {
       if (conf >= GPS_ACQUIRE_CONF || elapsed >= GPS_ACQUIRE_MS) {
         gpsAcquiring = false;
         bestAcquireFix = null;
+        diagLogEvent('GPSAcquisitionCompleted', { accuracy: Math.round(acc), confidence: Math.round(conf) });
       }
     }
 
@@ -1730,7 +1855,7 @@ function onGps(pos) {
   }
 
   // Stage 4 – Adaptive Map Matching (display only)
-  const snapped = mapMatchDisplay(filtLat, filtLng, quality.score, kfSpd);
+  const snapped = mapMatchDisplay(filtLat, filtLng, quality.score, kfSpd, hdg);
 
   // Navigation position (routing, off-route, voice)
   navLat = filtLat;
@@ -1749,7 +1874,7 @@ function onGps(pos) {
   if (navActive && kfInitialized && kfSpd > KF_MIN_SPEED_MS) {
     const predLat     = kfLat.x + kfLat.v * KF_PREDICT_DT;
     const predLng     = kfLng.x + kfLng.v * KF_PREDICT_DT;
-    const predSnapped = mapMatchDisplay(predLat, predLng, quality.score, kfSpd);
+    const predSnapped = mapMatchDisplay(predLat, predLng, quality.score, kfSpd, hdg);
     tgtLat = predSnapped.lat;
     tgtLng = predSnapped.lng;
   } else {
@@ -1873,9 +1998,11 @@ function extractSteps(path) {
   return (path.instructions || []).map(function(inst, idx) {
     return {
       instruction: stripHtml(inst.text || 'Continue'),
-      distance: inst.distance || 0,
-      interval: inst.interval || [0, 0],
-      sign: inst.sign || 0,
+      distance:    inst.distance || 0,
+      interval:    inst.interval || [0, 0],
+      sign:        inst.sign || 0,
+      streetName:  inst.street_name || inst.name || '',
+      timeSecs:    inst.time ? inst.time / 1000 : 0,
       distFromStart: inst.interval ? polylineLength(routeCoords.slice(0, inst.interval[0] + 1)) : 0,
       idx: idx
     };
@@ -1935,12 +2062,23 @@ async function startNavigation() {
   navZoomSmoothed = NAV_ZOOM;
   headingChangeRate = 0;
   displayedDistToManeuver = 0;
+  // v1.4 state resets
+  lastMatchedSegIdx    = -1;
+  trafficSpeeds        = [];
+  continuousProgress   = 0;
+  lastProgressUpdateMs = Date.now();
+  lastDisplayedStepIdx = -1;
+  lastGpsUpdateTime    = Date.now();
+  gpsReacquisitionCount = 0;
   if (map.getSource('route-highlight')) {
     map.getSource('route-highlight').setData(lineFeature([]));
     map.setPaintProperty('route-highlight', 'line-opacity', 0.97);
   }
+  // Reduce traffic overlay opacity so active route remains dominant
+  map.setPaintProperty('tomtom-flow', 'raster-opacity', 0.42);
   startDistInterpolation();
   if (DIAG_MODE) $('diag').classList.add('visible');
+  diagNavStart();
 
   // Remove existing GPS marker — onGps will recreate it as an arrow on next fix
   if (gpsMarker) { gpsMarker.remove(); gpsMarker = null; gpsMarkerIsArrow = false; }
@@ -1979,6 +2117,7 @@ function stopNavigation() {
   // Restore full route appearance and clear traffic/highlight overlays
   map.setPaintProperty('route-line',   'line-opacity', 0.95);
   map.setPaintProperty('route-casing', 'line-opacity', 0.9);
+  map.setPaintProperty('tomtom-flow',  'raster-opacity', 0.72);
   map.getSource('traffic-route').setData({ type: 'FeatureCollection', features: [] });
   if (map.getSource('route-highlight')) {
     map.getSource('route-highlight').setData(lineFeature([]));
@@ -1991,6 +2130,8 @@ function stopNavigation() {
   arrivalRadiusEnterTime = null;
   navZoomSmoothed = NAV_ZOOM;
   headingChangeRate = 0;
+  lastMatchedSegIdx = -1;
+  diagNavEnd();
 
   // Stop filter animation loop and restore dot marker
   stopMarkerAnimation();
@@ -2069,6 +2210,10 @@ async function triggerReroute() {
     navStep               = 0;   // will be recomputed on next syncNavigation
     currentRouteIdx       = 0;
     trafficColors         = [];
+    trafficSpeeds         = [];
+    lastMatchedSegIdx     = -1;
+    continuousProgress    = 0;
+    lastDisplayedStepIdx  = -1;
     lastTrafficRouteUpdate = 0;
     etaSmoothed           = 0;
     lastSpokenStep        = -1;  // causes next sync to announce step 1
@@ -2111,17 +2256,27 @@ function routeHighlightCoords(fromIdx, distM) {
 /* ── Smooth maneuver distance interpolation ─────────────────────── */
 function startDistInterpolation() {
   if (smoothDistTimer) return;
+  lastProgressUpdateMs = Date.now();
   smoothDistTimer = setInterval(function() {
-    if (!navActive || displayedDistToManeuver <= 0) return;
+    if (!navActive) return;
     const now = Date.now();
-    const dt  = (now - lastHudDistMs) / 1000;
-    lastHudDistMs = now;
+    const dt  = Math.max(0, Math.min(2, (now - lastProgressUpdateMs) / 1000));
+    lastProgressUpdateMs = now;
     const spd = speedFromKf();
-    if (spd > 0.5) {
-      displayedDistToManeuver = Math.max(0, displayedDistToManeuver - spd * dt);
-      $('nav-distance').textContent = formatDist(displayedDistToManeuver);
+    if (spd > 0.5 && dt > 0) {
+      // Advance monotone progress between GPS fixes
+      continuousProgress += spd * dt;
+      const step = navSteps[navStep];
+      if (step) {
+        const predicted = Math.max(0, step.distFromStart - continuousProgress);
+        // Only allow displayed value to decrease (prevents upward flicker)
+        if (predicted < displayedDistToManeuver) {
+          displayedDistToManeuver = predicted;
+          $('nav-distance').textContent = formatDist(displayedDistToManeuver);
+        }
+      }
     }
-  }, 250);
+  }, 200);
 }
 
 function stopDistInterpolation() {
@@ -2146,6 +2301,7 @@ function checkArrival(lat, lng, remainDist, progress) {
 function confirmArrival() {
   if (arrivalConfirmed) return;
   arrivalConfirmed = true;
+  diagLogEvent('Arrival', { distTravelled: Math.round(continuousProgress) });
   const destName = (dest && dest.label) || (dest ? dest.lat.toFixed(5) + ', ' + dest.lng.toFixed(5) : 'Destination');
   addRecentSearch(destName, dest.lat, dest.lng);
   if (window.speechSynthesis) window.speechSynthesis.cancel();
@@ -2173,6 +2329,11 @@ function syncNavigation(lat, lng) {
   const fromIdx  = closest.closestIdx;
   currentRouteIdx = fromIdx;
   const progress  = polylineLength(routeCoords.slice(0, fromIdx + 1));
+  // Monotone progress — only advance, never regress (GPS bounce guard)
+  if (progress > continuousProgress) {
+    continuousProgress   = progress;
+    lastProgressUpdateMs = Date.now();
+  }
   const remainDist = polylineLength(routeCoords.slice(fromIdx));
 
   // ── 2. Maneuver index — monotonically advancing ────
@@ -2196,7 +2357,7 @@ function syncNavigation(lat, lng) {
 
   // ── 4. Traffic-coloured ahead portion + highlight ──
   if (map.getSource('route-highlight')) {
-    map.getSource('route-highlight').setData(lineFeature(routeHighlightCoords(fromIdx, 400)));
+    map.getSource('route-highlight').setData(lineFeature(routeHighlightCoords(fromIdx, 500)));
   }
   const remaining = routeCoords.slice(fromIdx);
   map.getSource('traffic-route').setData({
@@ -2212,7 +2373,10 @@ function syncNavigation(lat, lng) {
   const threshold = lastAccuracy ? Math.max(50, lastAccuracy * 1.5) : 50;
   if (closest.distToRoute > threshold) {
     offRouteCount++;
+    if (offRouteCount === 1) diagLogEvent('OffRoute', { distM: Math.round(closest.distToRoute) });
     if (offRouteCount >= 5 && !isRerouting) {
+      diagLogEvent('Reroute', { fromLat: lat, fromLng: lng });
+      if (diagLog) diagLog.summary.rerouteCount = (diagLog.summary.rerouteCount || 0) + 1;
       triggerReroute(); // async — sets isRerouting=true synchronously
     }
   } else {
@@ -2223,7 +2387,19 @@ function syncNavigation(lat, lng) {
 function updateHud(stepIdx, distToManeuver, remainDist) {
   const step = navSteps[stepIdx] || { instruction: 'Continue', sign: 0 };
   $('nav-instruction').textContent = step.instruction;
-  displayedDistToManeuver = distToManeuver || 0;
+  const incomingDist = distToManeuver || 0;
+  if (stepIdx !== lastDisplayedStepIdx || incomingDist === 0) {
+    // New step or reset — accept GPS value and sync continuous progress
+    displayedDistToManeuver = incomingDist;
+    lastDisplayedStepIdx = stepIdx;
+    if (step.distFromStart && incomingDist >= 0) {
+      const implied = step.distFromStart - incomingDist;
+      if (implied > continuousProgress) continuousProgress = implied;
+    }
+  } else {
+    // Same step — displayed distance can only decrease (prevents upward flicker)
+    displayedDistToManeuver = Math.min(displayedDistToManeuver, incomingDist);
+  }
   lastHudDistMs = Date.now();
   $('nav-distance').textContent = formatDist(displayedDistToManeuver);
   $('nav-arrow').textContent = arrowForSign(step.sign);
@@ -2345,12 +2521,14 @@ async function fetchFlowForPoint(lat, lng) {
     const tid = setTimeout(function() { ctrl.abort(); }, 6000);
     const r = await fetch(url, { signal: ctrl.signal });
     clearTimeout(tid);
-    if (!r.ok) return 1;
+    if (!r.ok) return { ratio: 1, speedMs: null };
     const data = await r.json();
     const seg = data.flowSegmentData;
-    if (!seg || !seg.freeFlowSpeed || seg.freeFlowSpeed === 0) return 1;
-    return Math.min(1, Math.max(0, seg.currentSpeed / seg.freeFlowSpeed));
-  } catch(e) { return 1; }
+    if (!seg || !seg.freeFlowSpeed || seg.freeFlowSpeed === 0) return { ratio: 1, speedMs: null };
+    const ratio   = Math.min(1, Math.max(0, seg.currentSpeed / seg.freeFlowSpeed));
+    const speedMs = (seg.currentSpeed || 0) / 3.6;
+    return { ratio, speedMs };
+  } catch(e) { return { ratio: 1, speedMs: null }; }
 }
 
 async function fetchAndUpdateTrafficColors(fromIdx) {
@@ -2372,19 +2550,20 @@ async function fetchAndUpdateTrafficColors(fromIdx) {
   }
 
   const results = await Promise.all(samples.map(async function(s) {
-    const ratio = await fetchFlowForPoint(s.coord[0], s.coord[1]);
-    return { routeIdx: s.routeIdx, ratio: ratio };
+    const flow = await fetchFlowForPoint(s.coord[0], s.coord[1]);
+    return { routeIdx: s.routeIdx, ratio: flow.ratio, speedMs: flow.speedMs };
   }));
 
-  // Paint each route coord with the color of its nearest sample
+  // Paint each route coord with the color/speed of its nearest sample
   for (let i = fromIdx; i < routeCoords.length; i++) {
-    let bestRatio = 1, bestDist = Infinity;
+    let bestRatio = 1, bestSpeedMs = null, bestDist = Infinity;
     for (let j = 0; j < results.length; j++) {
       const d = haversine(routeCoords[i][0], routeCoords[i][1],
                           routeCoords[results[j].routeIdx][0], routeCoords[results[j].routeIdx][1]);
-      if (d < bestDist) { bestDist = d; bestRatio = results[j].ratio; }
+      if (d < bestDist) { bestDist = d; bestRatio = results[j].ratio; bestSpeedMs = results[j].speedMs; }
     }
     trafficColors[i] = ratioToTrafficColor(bestRatio);
+    trafficSpeeds[i] = bestSpeedMs;
   }
 
   // Redraw ahead portion if navigating
@@ -2428,7 +2607,7 @@ function coloredLineFeature(latLngs, color) {
 /* ── Traffic ───────────────────────────────────────── */
 async function refreshTraffic() {
   if (!map.getLayer('tomtom-flow')) return;
-  map.setPaintProperty('tomtom-flow', 'raster-opacity', 0.72);
+  map.setPaintProperty('tomtom-flow', 'raster-opacity', navActive ? 0.42 : 0.72);
   setPill('pill-traffic', 'active', 'FETCHING');
   const lat = userLat || 13.0827;
   const lng = userLng || 80.2707;
@@ -2484,9 +2663,50 @@ async function acquireWakeLock() {
   } catch (e) { dbg('Wake lock failed: ' + e.message); }
 }
 
+/* ── Background Recovery (feature 6) ───────────────────────────────────────── */
+function handleAppForeground() {
+  if (!navActive) return;
+  clearTimeout(foregroundRecoveryTimer);
+  foregroundRecoveryTimer = setTimeout(function() {
+    acquireWakeLock();
+    diagLogEvent('ApplicationForegrounded', {});
+    const stale = lastGpsUpdateTime === 0 || (Date.now() - lastGpsUpdateTime) > GPS_STALE_MS;
+    if (stale) {
+      dbg('GPS stale after background (' + Math.round((Date.now() - lastGpsUpdateTime) / 1000) + 's) — restarting watch');
+      restartGpsWatch();
+    } else {
+      pollGpsOnce();
+    }
+  }, 300); // debounce — visibilitychange + focus may fire together
+}
+
+function restartGpsWatch() {
+  if (gpsWatchId !== null) { navigator.geolocation.clearWatch(gpsWatchId); gpsWatchId = null; }
+  if (gpsPollTimer !== null) { clearInterval(gpsPollTimer); gpsPollTimer = null; }
+  gpsWatchId   = navigator.geolocation.watchPosition(onGps, onGpsError, GPS_WATCH_OPTIONS);
+  gpsPollTimer = setInterval(pollGpsOnce, GPS_POLL_MS);
+  pollGpsOnce();
+  if (navActive) {
+    gpsAcquiring    = true;
+    gpsAcquireStart = Date.now();
+    bestAcquireFix  = null;
+    gpsReacquisitionCount++;
+    setPill('pill-gps', 'warn', 'REACQUIRING');
+    diagLogEvent('GPSWatchRestarted', { reacquisitionCount: gpsReacquisitionCount });
+    dbg('GPS watch restarted — reacquisition #' + gpsReacquisitionCount);
+  }
+}
+
 document.addEventListener('visibilitychange', function() {
-  if (document.visibilityState === 'visible' && navActive) { acquireWakeLock(); pollGpsOnce(); }
+  if (document.visibilityState === 'visible') {
+    handleAppForeground();
+  } else if (navActive) {
+    diagLogEvent('ApplicationBackgrounded', {});
+    dbg('App backgrounded');
+  }
 });
+window.addEventListener('pageshow',  function() { handleAppForeground(); });
+window.addEventListener('focus',     function() { handleAppForeground(); });
 
 function findClosestRoutePoint(lat, lng) {
   let bestIdx = 0, bestDist = Infinity;
@@ -2522,6 +2742,125 @@ function formatDist(m) {
   if (!isFinite(m)) return '--';
   if (m < 1000) return Math.round(m) + ' m';
   return (m / 1000).toFixed(m < 10000 ? 1 : 0) + ' km';
+}
+
+/* ── Navigation Diagnostics (feature 7) ─────────────────────────────────────
+   All entry points guard on DIAG_LOG_ENABLED so overhead is near-zero when off.
+   ─────────────────────────────────────────────────────────────────────────── */
+function diagLogEvent(name, meta) {
+  if (!DIAG_LOG_ENABLED || !diagLog) return;
+  const entry = { ts: new Date().toISOString(), event: name };
+  if (meta) Object.keys(meta).forEach(function(k) { entry[k] = meta[k]; });
+  diagLog.events.push(entry);
+}
+
+function diagNavStart() {
+  if (!DIAG_LOG_ENABLED) return;
+  if (diagTelemetryTimer) { clearInterval(diagTelemetryTimer); diagTelemetryTimer = null; }
+  diagLog = {
+    summary: {
+      startTime:        new Date().toISOString(),
+      endTime:          null,
+      origin:           origin ? { lat: origin.lat, lng: origin.lng, label: origin.label } : null,
+      destination:      dest   ? { lat: dest.lat,   lng: dest.lng,   label: dest.label   } : null,
+      plannedEtaSecs:   routeTotalTimeSecs,
+      actualArrivalTime: null,
+      etaErrorSecs:     null,
+      routeDistanceM:   routeTotalDistance,
+      travelledDistanceM: 0,
+      avgSpeedMs:       0,
+      maxSpeedMs:       0,
+      avgAccuracyM:     0,
+      worstAccuracyM:   0,
+      avgKfConfidence:  0,
+      rerouteCount:     0,
+      offRouteCount:    0,
+      gpsReacquisitionCount: 0,
+      _spd: { sum: 0, n: 0 }, _acc: { sum: 0, n: 0 }, _kf: { sum: 0, n: 0 }
+    },
+    telemetry: [],
+    events:    []
+  };
+  diagLogEvent('NavigationStarted', {
+    routeDistanceM: routeTotalDistance,
+    plannedEtaSecs: routeTotalTimeSecs
+  });
+  diagLogEvent('GPSAcquisitionStarted', {});
+  diagTelemetryTimer = setInterval(diagRecordTick, 1000);
+}
+
+function diagRecordTick() {
+  if (!DIAG_LOG_ENABLED || !diagLog || !navActive) return;
+  const spd  = speedFromKf();
+  const acc  = lastAccuracy || 0;
+  const kfC  = lastQualityScore;
+  const s    = diagLog.summary;
+  if (spd > 0) { s._spd.sum += spd; s._spd.n++; s.maxSpeedMs = Math.max(s.maxSpeedMs, spd); }
+  if (acc > 0) { s._acc.sum += acc; s._acc.n++;  s.worstAccuracyM = Math.max(s.worstAccuracyM, acc); }
+  s._kf.sum += kfC; s._kf.n++;
+
+  const step = navSteps[navStep];
+  diagLog.telemetry.push({
+    ts:               new Date().toISOString(),
+    rawLat:           lastRawFix ? lastRawFix.lat  : null,
+    rawLng:           lastRawFix ? lastRawFix.lng  : null,
+    filtLat:          navLat,
+    filtLng:          navLng,
+    dispLat:          dispLat,
+    dispLng:          dispLng,
+    acc:              acc,
+    speedMs:          spd,
+    heading:          headingSmoothed,
+    routeProgressM:   continuousProgress,
+    remainingM:       routeTotalDistance - continuousProgress,
+    nextManeuverM:    displayedDistToManeuver,
+    etaMs:            etaSmoothed > 0 ? Date.now() + etaSmoothed * 1000 : null,
+    kfConfidence:     kfC,
+    matchedSegIdx:    lastMatchedSegIdx,
+    mapMatchConf:     lastMatchedSegIdx >= 0 ? 1 : 0,
+    cameraBearing:    map ? Math.round(map.getBearing()) : 0,
+    cameraZoom:       map ? map.getZoom().toFixed(2) : 0
+  });
+}
+
+function diagNavEnd() {
+  if (!DIAG_LOG_ENABLED || !diagLog) return;
+  if (diagTelemetryTimer) { clearInterval(diagTelemetryTimer); diagTelemetryTimer = null; }
+  const s   = diagLog.summary;
+  const now = new Date();
+  s.endTime             = now.toISOString();
+  s.travelledDistanceM  = continuousProgress;
+  s.avgSpeedMs          = s._spd.n > 0 ? s._spd.sum / s._spd.n : 0;
+  s.avgAccuracyM        = s._acc.n > 0 ? s._acc.sum / s._acc.n : 0;
+  s.avgKfConfidence     = s._kf.n  > 0 ? s._kf.sum  / s._kf.n  : 0;
+  s.gpsReacquisitionCount = gpsReacquisitionCount;
+  delete s._spd; delete s._acc; delete s._kf;
+  if (arrivalConfirmed) {
+    s.actualArrivalTime = s.endTime;
+    s.etaErrorSecs      = s.plannedEtaSecs ? Math.round(
+      (now.getTime() - new Date(s.startTime).getTime()) / 1000 - s.plannedEtaSecs
+    ) : null;
+  }
+  diagLogEvent('NavigationEnded', {
+    travelledM: Math.round(continuousProgress),
+    durationSecs: Math.round((now - new Date(s.startTime)) / 1000)
+  });
+
+  const destLabel = (dest && dest.label)
+    ? dest.label.replace(/[^a-zA-Z0-9\-]/g, '_').slice(0, 40) : 'Unknown';
+  const ts = now.toISOString().slice(0, 16).replace(/[:T]/g, function(c) { return c === 'T' ? '_' : ''; });
+  const filename = ts + '_' + destLabel + '.json';
+
+  try {
+    const blob = new Blob([JSON.stringify(diagLog)], { type: 'application/json' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url; a.download = filename; a.style.display = 'none';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function() { URL.revokeObjectURL(url); }, 5000);
+    dbg('Diagnostics saved: ' + filename);
+  } catch(e) { dbg('Diag save failed: ' + e.message); }
+  diagLog = null;
 }
 
 window.addEventListener('load', initMap);
