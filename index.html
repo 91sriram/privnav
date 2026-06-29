@@ -557,6 +557,11 @@ const ARRIVAL_DIST_M   = 50;  // remaining route (m) below which arrival is poss
 const ARRIVAL_RADIUS_M = 35;  // GPS distance-to-destination that starts the dwell timer
 const ARRIVAL_DWELL_S  = 5;   // seconds at low speed inside radius to confirm arrival
 
+// ── GPS acquisition (first fix quality) ─────────────────────────────────────
+const GPS_ACQUIRE_MS     = 15000;  // window to wait for a high-quality initial fix
+const GPS_ACQUIRE_CONF   = 70;     // confidence score that exits acquisition early
+const GPS_ACQUIRE_JUMP_M = 100;    // minimum displacement (m) to trigger a KF re-anchor
+
 // ── Search Manager ───────────────────────────────────────────────────────────
 const SEARCH_DEBOUNCE_MS = 300;
 const SEARCH_MIN_CHARS   = 3;
@@ -639,6 +644,11 @@ let navZoomSmoothed  = NAV_ZOOM;
 let displayedDistToManeuver = 0;   // interpolated between GPS fixes
 let lastHudDistMs           = 0;
 let smoothDistTimer         = null;
+
+// ── GPS acquisition ──────────────────────────────────────────────────────────
+let gpsAcquiring    = false;
+let gpsAcquireStart = 0;
+let bestAcquireFix  = null;   // { lat, lng, acc, confidence }
 
 // ── Arrival detection ────────────────────────────────────────────────────────
 let arrivalRadiusEnterTime = null;
@@ -1327,12 +1337,31 @@ function normTomTom(r) {
   const poi  = r.poi || {};
   const addr = r.address || {};
   const name = poi.name || (addr.freeformAddress || '').split(',')[0] || addr.municipality || 'Place';
-  return { lat: pos.lat, lng: pos.lon, name: name, address: addr.freeformAddress || '', score: (r.score || 5) / 10, provider: 'tt' };
+  return {
+    lat: pos.lat, lng: pos.lon,
+    name: name,
+    address: addr.freeformAddress || '',
+    score: (r.score || 5) / 10,
+    provider: 'tt',
+    resultType: r.type || '',
+    entityType: r.entityType || ''
+  };
 }
 
 function normNominatim(r) {
-  const parts = (r.display_name || '').split(',');
-  return { lat: parseFloat(r.lat), lng: parseFloat(r.lon), name: parts.slice(0, 2).join(',').trim(), address: r.display_name || '', score: r.importance || 0.3, provider: 'nom' };
+  const parts   = (r.display_name || '').split(',');
+  const cls     = r.class || '';
+  const isGeo   = cls === 'place' || cls === 'boundary' || cls === 'administrative';
+  const isMunic = r.type === 'city' || r.type === 'town' || r.type === 'state' || r.type === 'country';
+  return {
+    lat: parseFloat(r.lat), lng: parseFloat(r.lon),
+    name: parts.slice(0, 2).join(',').trim(),
+    address: r.display_name || '',
+    score: r.importance || 0.3,
+    provider: 'nom',
+    resultType: isGeo ? 'Geography' : 'POI',
+    entityType: isMunic ? 'Municipality' : ''
+  };
 }
 
 function proximityScore(lat, lng) {
@@ -1340,16 +1369,50 @@ function proximityScore(lat, lng) {
   return Math.max(0, 1 - haversine(userLat, userLng, lat, lng) / 50000);
 }
 
-function deduplicateAndRank(items) {
+// Classify query intent from text heuristics and result metadata.
+// Used to set the proximity weight: city searches should NOT be dominated by
+// nearby irrelevant matches; street-level searches should be.
+function classifyQuery(q, items) {
+  const lq = q.toLowerCase().trim();
+
+  // Explicit local-area suffixes → maximise proximity
+  const localWords = ['nagar', 'colony', 'street', 'road', 'layout', 'sector', 'junction',
+                      'gate', 'cross', 'circle', 'marg', 'chowk', 'bazaar', 'district'];
+  if (localWords.some(function(w) { return lq.indexOf(w) !== -1; })) return 'local';
+
+  // If TomTom returns a major administrative entity as a top result → city/country search
+  const geoHit = items.slice(0, 2).find(function(r) {
+    return r.resultType === 'Geography' &&
+      (r.entityType === 'Municipality' || r.entityType === 'Country' ||
+       r.entityType === 'CountrySubdivision' || r.entityType === 'CountrySecondarySubdivision');
+  });
+  if (geoHit) return 'geo';
+
+  return 'poi';  // balanced default
+}
+
+function deduplicateAndRank(items, query) {
   const out = [];
   items.forEach(function(r) {
     if (r.lat == null || r.lng == null) return;
     if (out.some(function(e) { return haversine(e.lat, e.lng, r.lat, r.lng) < 80; })) return;
     out.push(r);
   });
+
+  const intent = classifyQuery(query || '', out);
+  // proxW: share of score that goes to GPS proximity
+  //   geo   → near-zero — "Mumbai" must beat a nearby place with the word "Mumbai"
+  //   local → dominant — nearby "Anna Nagar" beats a distant one
+  //   poi   → moderate  — default for most queries
+  const proxW  = intent === 'geo'   ? 0.05
+               : intent === 'local' ? 0.55
+               :                      0.35;
+  const scoreW = 1 - proxW;
+
   out.sort(function(a, b) {
-    return (proximityScore(b.lat, b.lng) * 0.4 + b.score * 0.6) -
-           (proximityScore(a.lat, a.lng) * 0.4 + a.score * 0.6);
+    const sa = proximityScore(a.lat, a.lng) * proxW + a.score * scoreW;
+    const sb = proximityScore(b.lat, b.lng) * proxW + b.score * scoreW;
+    return sb - sa;
   });
   return out.slice(0, 6);
 }
@@ -1382,15 +1445,15 @@ async function smartSearch(query, ctrl) {
   try {
     const ttR = await fetchTomTom(query, sig);
     if (ttR.length >= 3) {
-      results = deduplicateAndRank(ttR);
+      results = deduplicateAndRank(ttR, query);
     } else {
       const nomR = await fetchNominatim(query, sig);
-      results = deduplicateAndRank([].concat(ttR, nomR));
+      results = deduplicateAndRank([].concat(ttR, nomR), query);
     }
   } catch(e) {
     if (e.name === 'AbortError') throw e;
     try {
-      results = deduplicateAndRank(await fetchNominatim(query, sig));
+      results = deduplicateAndRank(await fetchNominatim(query, sig), query);
     } catch(e2) {
       if (e2.name === 'AbortError') throw e2;
       throw new Error('Search failed');
@@ -1471,7 +1534,8 @@ function bindSearch(kind) {
       smartSearch(q, ctrl).then(function(live) {
         const merged = deduplicateAndRank(
           recentMatches.map(function(r) { return { lat: r.lat, lng: r.lng, name: r.name, address: r.address, score: 2.0, provider: 'recent' }; })
-            .concat(live)
+            .concat(live),
+          q
         );
         renderResults(merged, results, onPick);
       }).catch(function(e) {
@@ -1578,6 +1642,33 @@ function onGps(pos) {
     rejectedCount++;
     dbg('GPS rejected – ' + chk.reason);
   } else {
+    // GPS Acquisition: during the first 15s of navigation, prefer higher-quality fixes.
+    // If a significantly better fix arrives far from the current KF position, re-anchor —
+    // resetting the filter removes the incorrect initial position without user action.
+    if (gpsAcquiring && navActive) {
+      const elapsed = Date.now() - gpsAcquireStart;
+      const conf    = quality.score;
+      const better  = !bestAcquireFix ||
+        conf > bestAcquireFix.confidence + 8 ||
+        (acc < bestAcquireFix.acc * 0.6 && conf >= bestAcquireFix.confidence - 5);
+      if (better) {
+        if (kfInitialized) {
+          const jumpM = haversine(kfLat.x, kfLng.x, rawLat, rawLng);
+          if (jumpM > GPS_ACQUIRE_JUMP_M) {
+            kfInitialized = false;
+            kfUpdateCount = 0;
+            currentRouteIdx = 0;
+            dbg('GPS re-anchor: ' + Math.round(jumpM) + 'm, conf ' + Math.round(conf));
+          }
+        }
+        bestAcquireFix = { lat: rawLat, lng: rawLng, acc: acc, confidence: conf };
+      }
+      if (conf >= GPS_ACQUIRE_CONF || elapsed >= GPS_ACQUIRE_MS) {
+        gpsAcquiring = false;
+        bestAcquireFix = null;
+      }
+    }
+
     // Stage 3 – Adaptive Kalman Filter Update
     // Pre-update speed drives noise selection; post-update speed used for display
     const preSpd = speedFromKf() || rawSpd;
@@ -1649,8 +1740,12 @@ function onGps(pos) {
 
   // GPS pill
   const accRound = Math.round(acc);
-  setPill('pill-gps', accRound < 80 ? 'ok' : 'warn',
-    filtLat.toFixed(4) + ',' + filtLng.toFixed(4) + ' +' + accRound + 'm');
+  if (gpsAcquiring && navActive) {
+    setPill('pill-gps', accRound < 80 ? 'ok' : 'warn', 'ACQUIRING +' + accRound + 'm');
+  } else {
+    setPill('pill-gps', accRound < 80 ? 'ok' : 'warn',
+      filtLat.toFixed(4) + ',' + filtLng.toFixed(4) + ' +' + accRound + 'm');
+  }
 
   if (!origin) setOrigin(filtLat, filtLng, 'Current GPS');
 
@@ -1785,6 +1880,9 @@ async function startNavigation() {
   speedSamples = []; etaSmoothed = 0; currentRouteIdx = 0;
   dispLat = null; dispLng = null; tgtLat = null; tgtLng = null; dispHdg = 0; tgtHdg = 0;
   rejectedCount = 0;
+  gpsAcquiring    = true;
+  gpsAcquireStart = Date.now();
+  bestAcquireFix  = null;
   arrivalRadiusEnterTime = null;
   arrivalConfirmed = false;
   navZoomSmoothed = NAV_ZOOM;
@@ -1841,6 +1939,8 @@ function stopNavigation() {
   }
   offRouteCount = 0;
   stopDistInterpolation();
+  gpsAcquiring = false;
+  bestAcquireFix = null;
   arrivalRadiusEnterTime = null;
   navZoomSmoothed = NAV_ZOOM;
   headingChangeRate = 0;
