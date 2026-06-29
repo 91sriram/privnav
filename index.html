@@ -1417,43 +1417,90 @@ function deduplicateAndRank(items, query) {
   return out.slice(0, 6);
 }
 
-async function fetchTomTom(query, signal) {
-  const prox = userLat ? '&lat=' + userLat + '&lon=' + userLng + '&radius=30000' : '';
+// Returns true when the query is likely a named geographic entity (city, country, state).
+// Those queries are sent WITHOUT GPS/viewport bias so nearby businesses with the same
+// name do not bury the intended place (e.g. "Mumbai Restaurant" beating Mumbai city).
+function isGeoQuery(q) {
+  const lq    = q.toLowerCase().trim();
+  const words = lq.split(/\s+/);
+
+  // Explicit local-area words → definitely proximity-sensitive
+  const localWords = ['nagar', 'colony', 'street', 'road', 'layout', 'sector', 'junction',
+                      'gate', 'cross', 'circle', 'marg', 'chowk', 'bazaar', 'district'];
+  if (localWords.some(function(w) { return lq.indexOf(w) !== -1; })) return false;
+
+  // Category / amenity terms → user wants nearby result
+  const categories = ['airport', 'hospital', 'restaurant', 'hotel', 'bank', 'mall', 'market',
+                      'school', 'college', 'temple', 'church', 'mosque', 'park', 'station',
+                      'metro', 'shop', 'cafe', 'pharmacy', 'petrol', 'fuel', 'atm',
+                      'supermarket', 'gym', 'cinema', 'theatre', 'library', 'police', 'fire'];
+  if (categories.some(function(w) {
+    return lq === w || lq.startsWith(w + ' ') || lq.endsWith(' ' + w);
+  })) return false;
+
+  // Single-word query of ≥ 4 chars with no local/category markers → treat as named place
+  // e.g. "Mumbai", "Delhi", "Bengaluru", "Singapore", "Chennai", "Hyderabad"
+  return words.length === 1 && lq.length >= 4;
+}
+
+async function fetchTomTom(query, signal, useBias) {
+  const prox    = (useBias && userLat) ? '&lat=' + userLat + '&lon=' + userLng + '&radius=30000' : '';
+  const country = useBias ? '&countrySet=IN' : '';
   const url = 'https://api.tomtom.com/search/2/search/' + encodeURIComponent(query) +
-    '.json?key=' + TT_KEY + '&limit=6&countrySet=IN' + prox + '&language=en-GB';
+    '.json?key=' + TT_KEY + '&limit=6' + country + prox + '&language=en-GB';
   const r = await fetch(url, { signal: signal });
   if (!r.ok) throw new Error('TT ' + r.status);
   return ((await r.json()).results || []).map(normTomTom);
 }
 
-async function fetchNominatim(query, signal) {
-  const prox = userLat
+async function fetchNominatim(query, signal, useBias) {
+  const viewbox = (useBias && userLat)
     ? '&viewbox=' + (userLng-0.5) + ',' + (userLat-0.4) + ',' + (userLng+0.5) + ',' + (userLat+0.4)
-    : '&viewbox=79.8,12.3,80.5,13.5';
+    : (useBias ? '&viewbox=79.8,12.3,80.5,13.5' : '');
+  const country = useBias ? '&countrycodes=in' : '';
   const url = 'https://nominatim.openstreetmap.org/search?q=' + encodeURIComponent(query) +
-    '&format=json&limit=6' + prox + '&bounded=0&countrycodes=in&addressdetails=1&accept-language=en';
+    '&format=json&limit=6' + viewbox + '&bounded=0' + country + '&addressdetails=1&accept-language=en';
   const r = await fetch(url, { signal: signal, headers: { 'User-Agent': 'PrivNav/2.0' } });
   if (!r.ok) throw new Error('Nom ' + r.status);
   return (await r.json()).map(normNominatim);
 }
 
 async function smartSearch(query, ctrl) {
-  const key = query.toLowerCase().trim();
+  const key  = query.toLowerCase().trim();
   if (searchCache[key]) return searchCache[key];
-  const sig = ctrl.signal;
+  const sig  = ctrl.signal;
+  const geoQ = isGeoQuery(query);  // true → omit GPS/viewport bias from both providers
   let results;
   try {
-    const ttR = await fetchTomTom(query, sig);
-    if (ttR.length >= 3) {
-      results = deduplicateAndRank(ttR, query);
+    const ttR = await fetchTomTom(query, sig, !geoQ);
+
+    // When bias was used, silently retry without it if no Geography entity came back
+    // and the query is a single word that could be a place name. Merge both result sets.
+    let ttExtra = [];
+    if (!geoQ) {
+      const hasGeo = ttR.some(function(r) {
+        return r.resultType === 'Geography' &&
+          (r.entityType === 'Municipality' || r.entityType === 'Country' ||
+           r.entityType === 'CountrySubdivision' || r.entityType === 'CountrySecondarySubdivision');
+      });
+      if (!hasGeo && key.split(/\s+/).length === 1 && key.length >= 4) {
+        try { ttExtra = await fetchTomTom(query, sig, false); } catch(e) {
+          if (e.name === 'AbortError') throw e;
+        }
+      }
+    }
+
+    const combined = [].concat(ttR, ttExtra);
+    if (combined.length >= 3) {
+      results = deduplicateAndRank(combined, query);
     } else {
-      const nomR = await fetchNominatim(query, sig);
-      results = deduplicateAndRank([].concat(ttR, nomR), query);
+      const nomR = await fetchNominatim(query, sig, !geoQ);
+      results = deduplicateAndRank([].concat(combined, nomR), query);
     }
   } catch(e) {
     if (e.name === 'AbortError') throw e;
     try {
-      results = deduplicateAndRank(await fetchNominatim(query, sig), query);
+      results = deduplicateAndRank(await fetchNominatim(query, sig, !geoQ), query);
     } catch(e2) {
       if (e2.name === 'AbortError') throw e2;
       throw new Error('Search failed');
