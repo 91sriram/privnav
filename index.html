@@ -615,8 +615,7 @@
 <script>
 const GH_KEY = '10eb47ca-323f-45aa-a666-c55978a75e6a';
 const TT_KEY = 'z0q4MOEZiJYluDAhrU2tyW88EuR2Soz0';
-const MAPPLS_KEY = 'odapugtzbztmbxmaeriuasiiscfcqayzhsbf';
-const MAPPLS_PROXY_URL = 'PASTE_PROXY_URL_HERE';
+const MAPPLS_PROXY_URL = '';
 const CHENNAI_CENTER = [80.2707, 13.0827];
 const NAV_ZOOM = 17;
 const NAV_PITCH = 48;
@@ -1674,9 +1673,6 @@ function maskMapplsUrl(url) {
 }
 
 function buildMapplsProxyUrl(params) {
-  if (!MAPPLS_PROXY_URL || MAPPLS_PROXY_URL === 'PASTE_PROXY_URL_HERE') {
-    throw new Error('Mappls proxy missing');
-  }
   const qs = params.toString();
   return MAPPLS_PROXY_URL + (MAPPLS_PROXY_URL.indexOf('?') === -1 ? '?' : '&') + qs;
 }
@@ -1833,6 +1829,10 @@ async function fetchTomTom(query, signal, useBias) {
 }
 
 async function fetchMappls(query, signal, useBias) {
+  if (!MAPPLS_PROXY_URL) {
+    console.warn('Mappls proxy unavailable');
+    return [];
+  }
   const params = new URLSearchParams({
     query: query,
     region: 'IND'
@@ -1862,6 +1862,7 @@ async function fetchMappls(query, signal, useBias) {
 }
 
 async function resolveMapplsELoc(eLoc, signal) {
+  if (!MAPPLS_PROXY_URL) throw new Error('Mappls proxy unavailable');
   const params = new URLSearchParams({
     eLoc: eLoc,
     region: 'IND'
@@ -1892,7 +1893,7 @@ async function resolveMapplsELoc(eLoc, signal) {
 }
 
 async function testMapplsSearch(query) {
-  if (!MAPPLS_PROXY_URL || MAPPLS_PROXY_URL === 'PASTE_PROXY_URL_HERE') {
+  if (!MAPPLS_PROXY_URL) {
     console.warn('Mappls test cannot run: replace MAPPLS_PROXY_URL first');
     return { raw: null, path: 'missing-proxy', normalized: [] };
   }
@@ -1921,6 +1922,34 @@ async function testMapplsSearch(query) {
 
 window.testMapplsSearch = testMapplsSearch;
 
+const MapplsProvider = {
+  name: 'Mappls',
+  search: async function(query, location) {
+    console.info('Searching provider: Mappls');
+    if (!MAPPLS_PROXY_URL) {
+      console.warn('Mappls proxy unavailable');
+      return [];
+    }
+    return fetchMappls(query, location.signal, location.useBias);
+  }
+};
+
+const TomTomProvider = {
+  name: 'TomTom',
+  search: async function(query, location) {
+    console.info('Searching provider: TomTom');
+    return fetchTomTom(query, location.signal, location.useBias);
+  }
+};
+
+const NominatimProvider = {
+  name: 'Nominatim',
+  search: async function(query, location) {
+    console.info('Searching provider: Nominatim');
+    return fetchNominatim(query, location.signal, location.useBias);
+  }
+};
+
 async function fetchNominatim(query, signal, useBias) {
   const viewbox = (useBias && userLat)
     ? '&viewbox=' + (userLng-0.5) + ',' + (userLat-0.4) + ',' + (userLng+0.5) + ',' + (userLat+0.4)
@@ -1935,13 +1964,14 @@ async function fetchNominatim(query, signal, useBias) {
 
 async function smartSearch(query, ctrl) {
   const rawKey = query.toLowerCase().trim();
-  const key  = 'v15:' + rawKey;
+  const key  = 'v151:' + (MAPPLS_PROXY_URL ? 'mappls:' : 'fallback:') + rawKey;
   if (searchCache[key]) return searchCache[key];
   const sig  = ctrl.signal;
   const geoQ = isGeoQuery(query);  // true → omit GPS/viewport bias from providers
+  const location = { signal: sig, useBias: !geoQ };
   let results;
   try {
-    const mapplsR = await fetchMappls(query, sig, !geoQ);
+    const mapplsR = await MapplsProvider.search(query, location);
     if (mapplsR.length) {
       const resolved = mapplsR.filter(function(r) { return isValidLatLng(r.lat, r.lng); });
       const unresolved = mapplsR.filter(function(r) { return !isValidLatLng(r.lat, r.lng) && r.eLoc; });
@@ -1961,7 +1991,7 @@ async function smartSearch(query, ctrl) {
   }
 
   try {
-    const ttR = await fetchTomTom(query, sig, !geoQ);
+    const ttR = await TomTomProvider.search(query, location);
 
     // When bias was used, silently retry without it if no Geography entity came back
     // and the query is a single word that could be a place name. Merge both result sets.
@@ -1973,7 +2003,7 @@ async function smartSearch(query, ctrl) {
            r.entityType === 'CountrySubdivision' || r.entityType === 'CountrySecondarySubdivision');
       });
       if (!hasGeo && rawKey.split(/\s+/).length === 1 && rawKey.length >= 4) {
-        try { ttExtra = await fetchTomTom(query, sig, false); } catch(e) {
+        try { ttExtra = await TomTomProvider.search(query, { signal: sig, useBias: false }); } catch(e) {
           if (e.name === 'AbortError') throw e;
         }
       }
@@ -1984,14 +2014,14 @@ async function smartSearch(query, ctrl) {
       results = deduplicateAndRank(combined, query);
     } else {
       console.warn('Fallback provider used: Nominatim');
-      const nomR = await fetchNominatim(query, sig, !geoQ);
+      const nomR = await NominatimProvider.search(query, location);
       results = deduplicateAndRank([].concat(combined, nomR), query);
     }
   } catch(e) {
     if (e.name === 'AbortError') throw e;
     try {
       console.warn('Fallback provider used: Nominatim', e.message);
-      results = deduplicateAndRank(await fetchNominatim(query, sig, !geoQ), query);
+      results = deduplicateAndRank(await NominatimProvider.search(query, location), query);
     } catch(e2) {
       if (e2.name === 'AbortError') throw e2;
       throw new Error('Search failed');
