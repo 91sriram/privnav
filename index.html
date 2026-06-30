@@ -1668,26 +1668,58 @@ function firstFinite() {
   return null;
 }
 
+function maskMapplsUrl(url) {
+  return String(url || '').replace(/(access_token=)[^&]+/i, '$1***');
+}
+
 function mapplsListFromResponse(data) {
-  if (Array.isArray(data)) return data;
-  if (!data || typeof data !== 'object') return [];
-  if (Array.isArray(data.suggestedLocations)) return data.suggestedLocations;
-  if (Array.isArray(data.results)) return data.results;
-  if (Array.isArray(data.response)) return data.response;
-  if (data.response && Array.isArray(data.response.suggestedLocations)) return data.response.suggestedLocations;
-  if (data.response && typeof data.response === 'object') return [data.response];
-  if (data.data && Array.isArray(data.data.suggestedLocations)) return data.data.suggestedLocations;
-  if (data.placeDetails && typeof data.placeDetails === 'object') return [data.placeDetails];
-  if (data.result && typeof data.result === 'object') return [data.result];
-  return [];
+  return mapplsDetectResultArray(data).items;
+}
+
+function mapplsDetectResultArray(data) {
+  if (Array.isArray(data)) return { items: data, path: 'root' };
+  if (!data || typeof data !== 'object') return { items: [], path: 'none' };
+
+  const candidates = [
+    ['data.suggestedLocations', data.data && data.data.suggestedLocations],
+    ['data.suggestedLocations.results', data.data && data.data.suggestedLocations && data.data.suggestedLocations.results],
+    ['suggestedLocations', data.suggestedLocations],
+    ['suggestedLocations.results', data.suggestedLocations && data.suggestedLocations.results],
+    ['data.results', data.data && data.data.results],
+    ['results', data.results],
+    ['data.response', data.data && data.data.response],
+    ['response', data.response],
+    ['data.places', data.data && data.data.places],
+    ['places', data.places],
+    ['data.suggestions', data.data && data.data.suggestions],
+    ['suggestions', data.suggestions],
+    ['placeDetails', data.placeDetails],
+    ['result', data.result]
+  ];
+
+  for (let i = 0; i < candidates.length; i++) {
+    const path = candidates[i][0], value = candidates[i][1];
+    if (Array.isArray(value)) return { items: value, path: path };
+    if (value && typeof value === 'object' && looksLikeMapplsPlace(value)) return { items: [value], path: path };
+  }
+  return { items: [], path: 'none' };
+}
+
+function looksLikeMapplsPlace(r) {
+  if (!r || typeof r !== 'object') return false;
+  return !!(r.placeName || r.name || r.suggestedName || r.place_name || r.title ||
+    r.placeAddress || r.address || r.formattedAddress || r.fullAddress ||
+    r.eLoc || r.eloc || r.placeId || r.place_id ||
+    r.latitude || r.lat || r.y || r.longitude || r.lng || r.lon || r.x);
 }
 
 function normMappls(r) {
-  const lat = firstFinite(r.latitude, r.lat);
-  const lng = firstFinite(r.longitude, r.lng, r.lon);
-  const name = r.placeName || r.name || r.poi || r.place_name || 'Place';
-  const address = r.placeAddress || r.address || r.formattedAddress || '';
-  const eLoc = r.eLoc || r.eloc || r.mapplsPin || r.placeId || r.place_id || '';
+  if (!r || typeof r !== 'object') return null;
+  const lat = firstFinite(r.latitude, r.lat, r.y);
+  const lng = firstFinite(r.longitude, r.lng, r.lon, r.x);
+  const name = r.placeName || r.name || r.suggestedName || r.place_name || r.title || 'Place';
+  const address = r.placeAddress || r.address || r.formattedAddress || r.fullAddress || '';
+  const eLoc = r.eLoc || r.eloc || r.placeId || r.place_id || '';
   if (!isValidLatLng(lat, lng) && !eLoc) return null;
   return {
     lat: isValidLatLng(lat, lng) ? lat : null,
@@ -1800,13 +1832,24 @@ async function fetchMappls(query, signal, useBias) {
   });
   if (useBias && userLat && userLng) params.set('location', userLat + ',' + userLng);
   const url = 'https://search.mappls.com/search/places/autosuggest/json?' + params.toString();
+  console.info('Mappls request URL', maskMapplsUrl(url));
   const r = await fetch(url, { signal: signal });
+  console.info('Mappls HTTP status', r.status);
+  const text = await r.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch(e) {
+    console.warn('Mappls raw response was not JSON', text);
+    throw new Error('Mappls invalid JSON');
+  }
+  console.info('Mappls raw JSON response', data);
   if (!r.ok) {
-    console.warn('Mappls HTTP status', r.status);
+    console.warn('Mappls HTTP status', r.status, 'body', data || text);
     throw new Error('Mappls ' + r.status);
   }
-  const data = await r.json();
-  const normalized = mapplsListFromResponse(data).map(normMappls).filter(Boolean);
+  const detected = mapplsDetectResultArray(data);
+  console.info('Mappls detected result array path', detected.path);
+  const normalized = detected.items.map(normMappls).filter(Boolean);
+  console.info('Mappls first normalized result', normalized[0] || null);
   if (!normalized.length) console.warn('Mappls response had no usable coordinates/eLoc', data);
   return normalized;
 }
@@ -1820,14 +1863,25 @@ async function resolveMapplsELoc(eLoc, signal) {
   let lastErr = null;
   for (let i = 0; i < urls.length; i++) {
     try {
+      console.info('Mappls eLoc request URL', maskMapplsUrl(urls[i]));
       const r = await fetch(urls[i], { signal: signal });
+      console.info('Mappls eLoc HTTP status', r.status);
+      const text = await r.text();
+      let data = null;
+      try { data = text ? JSON.parse(text) : null; } catch(e) {
+        console.warn('Mappls eLoc raw response was not JSON', text);
+        lastErr = new Error('Mappls detail invalid JSON');
+        continue;
+      }
+      console.info('Mappls eLoc raw JSON response', data);
       if (!r.ok) {
-        console.warn('Mappls HTTP status', r.status);
+        console.warn('Mappls HTTP status', r.status, 'body', data || text);
         lastErr = new Error('Mappls detail ' + r.status);
         continue;
       }
-      const data = await r.json();
-      const hit = mapplsListFromResponse(data).map(normMappls).filter(function(x) {
+      const detected = mapplsDetectResultArray(data);
+      console.info('Mappls eLoc detected result array path', detected.path);
+      const hit = detected.items.map(normMappls).filter(function(x) {
         return isValidLatLng(x.lat, x.lng);
       })[0];
       if (hit) return { lat: hit.lat, lng: hit.lng, address: hit.address, name: hit.name };
@@ -1839,6 +1893,37 @@ async function resolveMapplsELoc(eLoc, signal) {
   }
   throw lastErr || new Error('Mappls detail failed');
 }
+
+async function testMapplsSearch(query) {
+  if (!MAPPLS_KEY || MAPPLS_KEY === 'PASTE_MAPPLS_KEY_HERE') {
+    console.warn('Mappls test cannot run: replace MAPPLS_KEY first');
+    return { raw: null, path: 'missing-key', normalized: [] };
+  }
+  const params = new URLSearchParams({
+    query: query || 'Murugan Idli',
+    access_token: MAPPLS_KEY,
+    region: 'IND'
+  });
+  if (!isGeoQuery(query || '') && userLat && userLng) params.set('location', userLat + ',' + userLng);
+  const url = 'https://search.mappls.com/search/places/autosuggest/json?' + params.toString();
+  console.info('Mappls test request URL', maskMapplsUrl(url));
+  const r = await fetch(url);
+  console.info('Mappls test HTTP status', r.status);
+  const text = await r.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch(e) {
+    console.warn('Mappls test raw response was not JSON', text);
+    throw e;
+  }
+  const detected = mapplsDetectResultArray(data);
+  const normalized = detected.items.map(normMappls).filter(Boolean);
+  console.info('Mappls test raw response', data);
+  console.info('Mappls test detected result array path', detected.path);
+  console.info('Mappls test normalized results', normalized);
+  return { raw: data, path: detected.path, normalized: normalized };
+}
+
+window.testMapplsSearch = testMapplsSearch;
 
 async function fetchNominatim(query, signal, useBias) {
   const viewbox = (useBias && userLat)
