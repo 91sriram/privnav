@@ -194,6 +194,56 @@
   .result-name { font-size: 13px; font-weight: 700; }
   .result-addr { margin-top: 2px; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .result-badge { opacity: 0.45; margin-right: 4px; font-size: 0.85em; }
+  .saved-search-actions { display: flex; gap: 8px; padding-top: 6px; }
+  .saved-search-actions button { flex: 1; min-height: 32px; font-size: 12px; font-weight: 700; }
+  .modal-backdrop {
+    display: none;
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    align-items: center;
+    justify-content: center;
+    padding: 12px;
+    background: rgba(0,0,0,0.58);
+  }
+  .modal-backdrop.active { display: flex; }
+  .modal {
+    width: min(440px, 100%);
+    max-height: min(680px, calc(100vh - 24px));
+    overflow: auto;
+    padding: 12px;
+    background: rgba(21,24,32,0.98);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 18px 42px rgba(0,0,0,0.5);
+  }
+  .modal-title { font-size: 13px; font-weight: 800; margin-bottom: 10px; }
+  .modal-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .modal textarea {
+    width: 100%;
+    min-height: 76px;
+    resize: vertical;
+    padding: 9px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #0f1219;
+    color: var(--text);
+    font: inherit;
+    outline: none;
+  }
+  .saved-place-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 8px;
+    align-items: center;
+    padding: 8px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+  }
+  .saved-place-row:last-child { border-bottom: 0; }
+  .saved-place-name { font-size: 13px; font-weight: 800; }
+  .saved-place-addr { margin-top: 2px; font-size: 11px; color: var(--muted); }
+  .saved-place-actions { display: flex; gap: 6px; }
+  .saved-place-actions button { min-height: 30px; padding: 0 8px; font-size: 11px; }
 
   /* ── Nav HUD ─────────────────────────────────────── */
   #nav-hud {
@@ -488,6 +538,10 @@
           <label>Where to?</label>
           <input id="dest-input" placeholder="Search destination" autocomplete="off">
           <div id="dest-results" class="results"></div>
+          <div class="saved-search-actions">
+            <button id="add-place-btn">Add Place</button>
+            <button id="manage-places-btn">Manage</button>
+          </div>
         </div>
         <div class="row">
           <button id="route-btn" class="primary" style="flex:1">Route</button>
@@ -513,12 +567,55 @@
     </div>
     <div id="toast"></div>
     <div id="debug"></div>
+
+    <div id="place-modal-backdrop" class="modal-backdrop">
+      <div class="modal">
+        <div class="modal-title" id="place-modal-title">Add Saved Place</div>
+        <div class="stack">
+          <label>Name</label>
+          <input id="place-name" placeholder="Favourite Biryani Shop" autocomplete="off">
+          <label>Address</label>
+          <input id="place-address" placeholder="Velachery, Chennai" autocomplete="off">
+          <div class="modal-grid">
+            <div class="stack">
+              <label>Latitude</label>
+              <input id="place-lat" inputmode="decimal" placeholder="12.98213">
+            </div>
+            <div class="stack">
+              <label>Longitude</label>
+              <input id="place-lng" inputmode="decimal" placeholder="80.22142">
+            </div>
+          </div>
+          <label>Paste coordinates or map link</label>
+          <textarea id="place-import" placeholder="12.912345,80.123456&#10;https://www.google.com/maps/..."></textarea>
+          <div class="row">
+            <button id="place-import-btn" style="flex:1">Read Paste</button>
+            <button id="place-geocode-btn" style="flex:1">Geocode Address</button>
+          </div>
+          <div class="row">
+            <button id="place-cancel-btn" style="flex:1">Cancel</button>
+            <button id="place-save-btn" class="primary" style="flex:2">Save Place</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="places-manage-backdrop" class="modal-backdrop">
+      <div class="modal">
+        <div class="modal-title">Saved Places</div>
+        <div id="places-list"></div>
+        <div class="row" style="margin-top:10px">
+          <button id="places-close-btn" style="flex:1">Close</button>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
 <script>
 const GH_KEY = '10eb47ca-323f-45aa-a666-c55978a75e6a';
 const TT_KEY = 'z0q4MOEZiJYluDAhrU2tyW88EuR2Soz0';
+const MAPPLS_KEY = 'odapugtzbztmbxmaeriuasiiscfcqayzhsbf';
 const CHENNAI_CENTER = [80.2707, 13.0827];
 const NAV_ZOOM = 17;
 const NAV_PITCH = 48;
@@ -566,6 +663,7 @@ const GPS_ACQUIRE_JUMP_M = 100;    // minimum displacement (m) to trigger a KF r
 const SEARCH_DEBOUNCE_MS = 300;
 const SEARCH_MIN_CHARS   = 3;
 const SEARCH_CACHE_SIZE  = 50;
+const SAVED_PLACES_KEY   = 'pn_saved_places_v1';
 
 // ── v1.4 additions ───────────────────────────────────────────────────────────
 const DIAG_LOG_ENABLED    = false;  // set true to save a JSON telemetry file per navigation
@@ -665,6 +763,8 @@ let arrivalConfirmed       = false;
 // ── Search ───────────────────────────────────────────────────────────────────
 let searchCache    = {};   // query → normalized results, localStorage-backed
 let recentSearches = [];   // last-picked places
+let savedPlaces    = [];   // local user-created place database
+let editingPlaceId = null;
 
 // Voice state
 let voiceMuted = false;
@@ -1378,6 +1478,13 @@ function initHandlers() {
   $('traffic-btn').addEventListener('click', refreshTraffic);
   $('recentre').addEventListener('click', recentre);
   $('nav-stop-float').addEventListener('click', stopNavigation);
+  $('add-place-btn').addEventListener('click', function() { openPlaceModal(); });
+  $('manage-places-btn').addEventListener('click', openManagePlaces);
+  $('place-cancel-btn').addEventListener('click', closePlaceModal);
+  $('place-save-btn').addEventListener('click', savePlaceFromModal);
+  $('place-import-btn').addEventListener('click', importPlacePaste);
+  $('place-geocode-btn').addEventListener('click', geocodePlaceModal);
+  $('places-close-btn').addEventListener('click', closeManagePlaces);
 
   // Route preview buttons
   $('rp-start').addEventListener('click', function() {
@@ -1415,6 +1522,7 @@ function initHandlers() {
     $('debug').style.display = $('debug').style.display === 'block' ? 'none' : 'block';
   });
 
+  loadSavedPlaces();
   loadSearchHistory();
   bindSearch('origin');
   bindSearch('dest');
@@ -1446,6 +1554,72 @@ function addRecentSearch(name, lat, lng) {
   recentSearches.unshift({ name: name, lat: lat, lng: lng });
   recentSearches = recentSearches.slice(0, 10);
   try { localStorage.setItem('pn_recent', JSON.stringify(recentSearches)); } catch(e) {}
+}
+
+function makeId() {
+  if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  return 'sp_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 9);
+}
+
+function loadSavedPlaces() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(SAVED_PLACES_KEY) || '[]');
+    savedPlaces = Array.isArray(raw) ? raw.map(normalizeSavedPlace).filter(Boolean) : [];
+    saveSavedPlaces();
+  } catch(e) {
+    savedPlaces = [];
+  }
+}
+
+function saveSavedPlaces() {
+  savedPlaces.sort(function(a, b) { return a.name.localeCompare(b.name); });
+  try { localStorage.setItem(SAVED_PLACES_KEY, JSON.stringify(savedPlaces)); } catch(e) {}
+}
+
+function normalizeSavedPlace(p) {
+  if (!p) return null;
+  const lat = parseFloat(p.lat), lng = parseFloat(p.lng);
+  if (!isFinite(lat) || !isFinite(lng)) return null;
+  return {
+    id: p.id || makeId(),
+    name: String(p.name || 'Saved Place').trim(),
+    address: String(p.address || '').trim(),
+    lat: lat,
+    lng: lng,
+    created: p.created || new Date().toISOString(),
+    updated: p.updated || p.created || new Date().toISOString(),
+    source: p.source || 'manual',
+    kind: p.kind || 'saved_place',
+    category: p.category || null,
+    tags: Array.isArray(p.tags) ? p.tags : []
+  };
+}
+
+function savedPlaceToResult(p) {
+  return {
+    id: p.id,
+    lat: p.lat,
+    lng: p.lng,
+    name: p.name,
+    address: p.address,
+    score: 3.0,
+    provider: 'saved',
+    source: p.source,
+    kind: p.kind,
+    category: p.category,
+    tags: p.tags || []
+  };
+}
+
+function searchSavedPlaces(query) {
+  const q = String(query || '').trim().toLowerCase();
+  const list = savedPlaces.slice().sort(function(a, b) { return a.name.localeCompare(b.name); });
+  if (!q) return list.slice(0, 8).map(savedPlaceToResult);
+  return list.filter(function(p) {
+    return p.name.toLowerCase().indexOf(q) !== -1 ||
+      (p.address || '').toLowerCase().indexOf(q) !== -1 ||
+      (p.tags || []).some(function(t) { return String(t).toLowerCase().indexOf(q) !== -1; });
+  }).slice(0, 8).map(savedPlaceToResult);
 }
 
 function escHtml(s) {
@@ -1483,6 +1657,48 @@ function normNominatim(r) {
     provider: 'nom',
     resultType: isGeo ? 'Geography' : 'POI',
     entityType: isMunic ? 'Municipality' : ''
+  };
+}
+
+function firstFinite() {
+  for (let i = 0; i < arguments.length; i++) {
+    const n = parseFloat(arguments[i]);
+    if (isFinite(n)) return n;
+  }
+  return null;
+}
+
+function mapplsListFromResponse(data) {
+  if (Array.isArray(data)) return data;
+  if (!data || typeof data !== 'object') return [];
+  if (Array.isArray(data.suggestedLocations)) return data.suggestedLocations;
+  if (Array.isArray(data.results)) return data.results;
+  if (Array.isArray(data.response)) return data.response;
+  if (data.response && Array.isArray(data.response.suggestedLocations)) return data.response.suggestedLocations;
+  if (data.response && typeof data.response === 'object') return [data.response];
+  if (data.data && Array.isArray(data.data.suggestedLocations)) return data.data.suggestedLocations;
+  if (data.placeDetails && typeof data.placeDetails === 'object') return [data.placeDetails];
+  if (data.result && typeof data.result === 'object') return [data.result];
+  return [];
+}
+
+function normMappls(r) {
+  const lat = firstFinite(r.latitude, r.lat);
+  const lng = firstFinite(r.longitude, r.lng, r.lon);
+  const name = r.placeName || r.name || r.poi || r.place_name || 'Place';
+  const address = r.placeAddress || r.address || r.formattedAddress || '';
+  const eLoc = r.eLoc || r.eloc || r.mapplsPin || r.placeId || r.place_id || '';
+  if (!isValidLatLng(lat, lng) && !eLoc) return null;
+  return {
+    lat: isValidLatLng(lat, lng) ? lat : null,
+    lng: isValidLatLng(lat, lng) ? lng : null,
+    name: name,
+    address: address,
+    score: 0.95,
+    provider: 'mappls',
+    resultType: r.type || r.resultType || '',
+    entityType: r.entityType || r.category || '',
+    eLoc: eLoc
   };
 }
 
@@ -1575,6 +1791,55 @@ async function fetchTomTom(query, signal, useBias) {
   return ((await r.json()).results || []).map(normTomTom);
 }
 
+async function fetchMappls(query, signal, useBias) {
+  if (!MAPPLS_KEY || MAPPLS_KEY === 'PASTE_MAPPLS_KEY_HERE') throw new Error('Mappls key missing');
+  const params = new URLSearchParams({
+    query: query,
+    access_token: MAPPLS_KEY,
+    region: 'IND'
+  });
+  if (useBias && userLat && userLng) params.set('location', userLat + ',' + userLng);
+  const url = 'https://search.mappls.com/search/places/autosuggest/json?' + params.toString();
+  const r = await fetch(url, { signal: signal });
+  if (!r.ok) {
+    console.warn('Mappls HTTP status', r.status);
+    throw new Error('Mappls ' + r.status);
+  }
+  const data = await r.json();
+  const normalized = mapplsListFromResponse(data).map(normMappls).filter(Boolean);
+  if (!normalized.length) console.warn('Mappls response had no usable coordinates/eLoc', data);
+  return normalized;
+}
+
+async function resolveMapplsELoc(eLoc, signal) {
+  if (!MAPPLS_KEY || MAPPLS_KEY === 'PASTE_MAPPLS_KEY_HERE') throw new Error('Mappls key missing');
+  const urls = [
+    'https://search.mappls.com/search/places/place_detail/json?place_id=' + encodeURIComponent(eLoc) + '&access_token=' + encodeURIComponent(MAPPLS_KEY),
+    'https://search.mappls.com/search/places/place_detail/json?eLoc=' + encodeURIComponent(eLoc) + '&access_token=' + encodeURIComponent(MAPPLS_KEY)
+  ];
+  let lastErr = null;
+  for (let i = 0; i < urls.length; i++) {
+    try {
+      const r = await fetch(urls[i], { signal: signal });
+      if (!r.ok) {
+        console.warn('Mappls HTTP status', r.status);
+        lastErr = new Error('Mappls detail ' + r.status);
+        continue;
+      }
+      const data = await r.json();
+      const hit = mapplsListFromResponse(data).map(normMappls).filter(function(x) {
+        return isValidLatLng(x.lat, x.lng);
+      })[0];
+      if (hit) return { lat: hit.lat, lng: hit.lng, address: hit.address, name: hit.name };
+      console.warn('Mappls response had no usable coordinates/eLoc', data);
+    } catch(e) {
+      if (e.name === 'AbortError') throw e;
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error('Mappls detail failed');
+}
+
 async function fetchNominatim(query, signal, useBias) {
   const viewbox = (useBias && userLat)
     ? '&viewbox=' + (userLng-0.5) + ',' + (userLat-0.4) + ',' + (userLng+0.5) + ',' + (userLat+0.4)
@@ -1588,11 +1853,32 @@ async function fetchNominatim(query, signal, useBias) {
 }
 
 async function smartSearch(query, ctrl) {
-  const key  = query.toLowerCase().trim();
+  const rawKey = query.toLowerCase().trim();
+  const key  = 'v15:' + rawKey;
   if (searchCache[key]) return searchCache[key];
   const sig  = ctrl.signal;
-  const geoQ = isGeoQuery(query);  // true → omit GPS/viewport bias from both providers
+  const geoQ = isGeoQuery(query);  // true → omit GPS/viewport bias from providers
   let results;
+  try {
+    const mapplsR = await fetchMappls(query, sig, !geoQ);
+    if (mapplsR.length) {
+      const resolved = mapplsR.filter(function(r) { return isValidLatLng(r.lat, r.lng); });
+      const unresolved = mapplsR.filter(function(r) { return !isValidLatLng(r.lat, r.lng) && r.eLoc; });
+      results = deduplicateAndRank(resolved, query).concat(unresolved).slice(0, 6);
+      if (results.length) {
+        searchCache[key] = results;
+        saveCache();
+        return results;
+      }
+      console.warn('Fallback provider used: TomTom');
+    } else {
+      console.warn('Fallback provider used: TomTom');
+    }
+  } catch(e) {
+    if (e.name === 'AbortError') throw e;
+    console.warn('Fallback provider used: TomTom', e.message);
+  }
+
   try {
     const ttR = await fetchTomTom(query, sig, !geoQ);
 
@@ -1605,7 +1891,7 @@ async function smartSearch(query, ctrl) {
           (r.entityType === 'Municipality' || r.entityType === 'Country' ||
            r.entityType === 'CountrySubdivision' || r.entityType === 'CountrySecondarySubdivision');
       });
-      if (!hasGeo && key.split(/\s+/).length === 1 && key.length >= 4) {
+      if (!hasGeo && rawKey.split(/\s+/).length === 1 && rawKey.length >= 4) {
         try { ttExtra = await fetchTomTom(query, sig, false); } catch(e) {
           if (e.name === 'AbortError') throw e;
         }
@@ -1616,12 +1902,14 @@ async function smartSearch(query, ctrl) {
     if (combined.length >= 3) {
       results = deduplicateAndRank(combined, query);
     } else {
+      console.warn('Fallback provider used: Nominatim');
       const nomR = await fetchNominatim(query, sig, !geoQ);
       results = deduplicateAndRank([].concat(combined, nomR), query);
     }
   } catch(e) {
     if (e.name === 'AbortError') throw e;
     try {
+      console.warn('Fallback provider used: Nominatim', e.message);
       results = deduplicateAndRank(await fetchNominatim(query, sig, !geoQ), query);
     } catch(e2) {
       if (e2.name === 'AbortError') throw e2;
@@ -1643,7 +1931,9 @@ function renderResults(items, resultsEl, onPick) {
   items.forEach(function(r) {
     const el = document.createElement('div');
     el.className = 'result';
-    const badge = r.provider === 'recent' ? '<span class="result-badge">↺</span>' : '';
+    const badge = r.provider === 'saved'
+      ? '<span class="result-badge">&#9733;</span>'
+      : (r.provider === 'recent' ? '<span class="result-badge">&#8634;</span>' : '');
     el.innerHTML = '<div class="result-name">' + badge + escHtml(r.name) + '</div>' +
       (r.address && r.address !== r.name ? '<div class="result-addr">' + escHtml(r.address) + '</div>' : '');
     el.addEventListener('click', function() { onPick(r); });
@@ -1656,22 +1946,39 @@ function bindSearch(kind) {
   const results = $(kind + '-results');
   let timer = null, searchCtrl = null;
 
-  function onPick(r) {
-    const lat = parseFloat(r.lat), lng = parseFloat(r.lng);
+  async function onPick(r) {
+    let lat = parseFloat(r.lat), lng = parseFloat(r.lng);
+    if (r.provider === 'mappls' && !isValidLatLng(lat, lng) && r.eLoc) {
+      try {
+        const resolved = await resolveMapplsELoc(r.eLoc, new AbortController().signal);
+        lat = resolved.lat;
+        lng = resolved.lng;
+        if (resolved.address && !r.address) r.address = resolved.address;
+      } catch(e) {
+        if (e.name !== 'AbortError') console.warn('Mappls eLoc resolve failed', e.message);
+        toast('Could not resolve Mappls place');
+        return;
+      }
+    }
+    if (!isValidLatLng(lat, lng)) {
+      toast('Search result has no coordinates');
+      return;
+    }
     input.value = r.name;
     results.style.display = 'none';
     results.innerHTML = '';
     if (kind === 'origin') setOrigin(lat, lng, r.name);
     else setDest(lat, lng, r.name);
     map.easeTo({ center: [lng, lat], zoom: 15, duration: 600 });
-    addRecentSearch(r.name, lat, lng);
+    if (r.provider !== 'saved') addRecentSearch(r.name, lat, lng);
   }
 
   input.addEventListener('focus', function() {
-    if (input.value.trim().length < SEARCH_MIN_CHARS && recentSearches.length) {
-      renderResults(recentSearches.slice(0, 5).map(function(r) {
+    if (input.value.trim().length < SEARCH_MIN_CHARS) {
+      const items = searchSavedPlaces('').concat(recentSearches.slice(0, 5).map(function(r) {
         return { lat: r.lat, lng: r.lng, name: r.name, address: '', score: 1.0, provider: 'recent' };
-      }), results, onPick);
+      }));
+      if (items.length) renderResults(items, results, onPick);
     }
   });
 
@@ -1685,35 +1992,217 @@ function bindSearch(kind) {
     const q = input.value.trim();
     if (q.length < SEARCH_MIN_CHARS) { results.style.display = 'none'; results.innerHTML = ''; return; }
 
+    const savedMatches = searchSavedPlaces(q);
     const recentMatches = recentSearches
       .filter(function(r) { return r.name.toLowerCase().indexOf(q.toLowerCase()) !== -1; })
       .slice(0, 3)
       .map(function(r) { return { lat: r.lat, lng: r.lng, name: r.name, address: '', score: 1.0, provider: 'recent' }; });
+    const immediateMatches = savedMatches.concat(recentMatches);
 
-    if (recentMatches.length) {
-      renderResults(recentMatches, results, onPick);
+    if (immediateMatches.length) {
+      renderResults(immediateMatches, results, onPick);
     } else {
       results.style.display = 'block';
-      results.innerHTML = '<div class="result"><div class="result-name">Searching…</div></div>';
+      results.innerHTML = '<div class="result"><div class="result-name">Searching...</div></div>';
     }
 
     timer = setTimeout(function() {
       searchCtrl = new AbortController();
       const ctrl = searchCtrl;
       smartSearch(q, ctrl).then(function(live) {
-        const merged = deduplicateAndRank(
-          recentMatches.map(function(r) { return { lat: r.lat, lng: r.lng, name: r.name, address: r.address, score: 2.0, provider: 'recent' }; })
-            .concat(live),
-          q
-        );
-        renderResults(merged, results, onPick);
+        renderResults(savedMatches.concat(recentMatches).concat(live), results, onPick);
       }).catch(function(e) {
         if (e.name === 'AbortError') return;
-        if (!recentMatches.length) results.innerHTML = '<div class="result"><div class="result-name">Search failed</div></div>';
+        if (!immediateMatches.length) results.innerHTML = '<div class="result"><div class="result-name">Search failed</div></div>';
         dbg('Search: ' + e.message);
       });
     }, SEARCH_DEBOUNCE_MS);
   });
+}
+
+function openPlaceModal(place) {
+  editingPlaceId = place && place.id ? place.id : null;
+  $('place-modal-title').textContent = editingPlaceId ? 'Edit Saved Place' : 'Add Saved Place';
+  $('place-name').value = place ? place.name : '';
+  $('place-address').value = place ? (place.address || '') : '';
+  $('place-lat').value = place ? place.lat : '';
+  $('place-lng').value = place ? place.lng : '';
+  $('place-import').value = '';
+  $('place-modal-backdrop').style.display = 'flex';
+  setTimeout(function() { $('place-name').focus(); }, 50);
+}
+
+function closePlaceModal() {
+  $('place-modal-backdrop').style.display = 'none';
+  editingPlaceId = null;
+}
+
+function openManagePlaces() {
+  renderSavedPlacesList();
+  $('places-manage-backdrop').style.display = 'flex';
+}
+
+function closeManagePlaces() {
+  $('places-manage-backdrop').style.display = 'none';
+}
+
+function renderSavedPlacesList() {
+  const list = $('places-list');
+  list.innerHTML = '';
+  if (!savedPlaces.length) {
+    list.innerHTML = '<div class="result"><div class="result-name">No saved places yet</div></div>';
+    return;
+  }
+  savedPlaces.slice().sort(function(a, b) { return a.name.localeCompare(b.name); }).forEach(function(p) {
+    const row = document.createElement('div');
+    row.className = 'saved-place-row';
+    row.innerHTML =
+      '<div class="saved-place-name">' + escHtml(p.name) + '</div>' +
+      (p.address ? '<div class="saved-place-addr">' + escHtml(p.address) + '</div>' : '') +
+      '<div class="saved-place-addr">' + p.lat.toFixed(6) + ', ' + p.lng.toFixed(6) + '</div>' +
+      '<div class="saved-place-actions">' +
+        '<button type="button" data-action="edit">Edit</button>' +
+        '<button type="button" data-action="delete">Delete</button>' +
+      '</div>';
+    row.querySelector('[data-action="edit"]').addEventListener('click', function() {
+      closeManagePlaces();
+      openPlaceModal(p);
+    });
+    row.querySelector('[data-action="delete"]').addEventListener('click', function() {
+      if (!confirm('Delete "' + p.name + '"?')) return;
+      savedPlaces = savedPlaces.filter(function(x) { return x.id !== p.id; });
+      saveSavedPlaces();
+      renderSavedPlacesList();
+      toast('Saved place deleted');
+    });
+    list.appendChild(row);
+  });
+}
+
+function isValidLatLng(lat, lng) {
+  const la = parseFloat(lat), lo = parseFloat(lng);
+  return isFinite(la) && isFinite(lo) && la >= -90 && la <= 90 && lo >= -180 && lo <= 180;
+}
+
+function savePlaceFromModal() {
+  const name = $('place-name').value.trim();
+  const address = $('place-address').value.trim();
+  const lat = parseFloat($('place-lat').value);
+  const lng = parseFloat($('place-lng').value);
+  if (!name) { toast('Add a place name'); return; }
+  if (!isValidLatLng(lat, lng)) { toast('Check latitude and longitude'); return; }
+
+  const existing = editingPlaceId ? savedPlaces.find(function(p) { return p.id === editingPlaceId; }) : null;
+  const place = normalizeSavedPlace({
+    id: existing ? existing.id : makeId(),
+    name: name,
+    address: address,
+    lat: lat,
+    lng: lng,
+    created: existing ? existing.created : new Date().toISOString(),
+    updated: new Date().toISOString(),
+    source: existing ? existing.source : 'manual',
+    kind: existing ? existing.kind : 'saved_place',
+    category: existing ? existing.category : null,
+    tags: existing ? existing.tags : []
+  });
+
+  if (existing) {
+    savedPlaces = savedPlaces.map(function(p) { return p.id === existing.id ? place : p; });
+  } else {
+    savedPlaces.push(place);
+  }
+  saveSavedPlaces();
+  closePlaceModal();
+  setDest(place.lat, place.lng, place.name);
+  map.easeTo({ center: [place.lng, place.lat], zoom: 15, duration: 600 });
+  toast(existing ? 'Saved place updated' : 'Saved place added');
+}
+
+async function geocodePlaceModal() {
+  const q = ($('place-address').value.trim() || $('place-name').value.trim());
+  if (!q) { toast('Add a name or address to geocode'); return; }
+  const btn = $('place-geocode-btn');
+  btn.disabled = true;
+  btn.textContent = 'Geocoding...';
+  try {
+    const results = await smartSearch(q, new AbortController());
+    if (!results.length) { toast('No geocode match found'); return; }
+    const hit = results[0];
+    $('place-lat').value = parseFloat(hit.lat).toFixed(6);
+    $('place-lng').value = parseFloat(hit.lng).toFixed(6);
+    if (!$('place-name').value.trim()) $('place-name').value = hit.name || q;
+    if (!$('place-address').value.trim() && hit.address) $('place-address').value = hit.address;
+    toast('Coordinates filled');
+  } catch(e) {
+    toast('Geocode failed');
+    dbg('Saved place geocode: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Geocode Address';
+  }
+}
+
+async function importPlacePaste() {
+  const text = $('place-import').value.trim();
+  if (!text) { toast('Paste coordinates or a map link'); return; }
+
+  const coords = extractCoordinates(text);
+  if (coords) {
+    $('place-lat').value = coords.lat.toFixed(6);
+    $('place-lng').value = coords.lng.toFixed(6);
+    const label = extractGoogleMapsQuery(text);
+    if (label && !$('place-name').value.trim()) $('place-name').value = label;
+    toast('Coordinates filled');
+    return;
+  }
+
+  const query = extractGoogleMapsQuery(text) || text;
+  if (/maps\.app\.goo\.gl|goo\.gl\/maps/i.test(text)) {
+    toast('Short Google links hide coordinates. Paste the expanded link or address.');
+    return;
+  }
+
+  if (query && query !== text && !$('place-name').value.trim()) $('place-name').value = query;
+  if (query) {
+    if (!$('place-address').value.trim()) $('place-address').value = query;
+    await geocodePlaceModal();
+  }
+}
+
+function extractCoordinates(text) {
+  const raw = String(text || '');
+  let decoded = raw;
+  try { decoded = decodeURIComponent(raw); } catch(e) {}
+  const candidates = decoded === raw ? [raw] : [raw, decoded];
+  const patterns = [
+    /@(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/,
+    /[?&](?:q|query|ll|center|destination)=(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/i,
+    /!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/i,
+    /(-?\d+(?:\.\d+)?)[,\s]+(-?\d+(?:\.\d+)?)/
+  ];
+  for (let c = 0; c < candidates.length; c++) {
+    for (let i = 0; i < patterns.length; i++) {
+      const m = candidates[c].match(patterns[i]);
+      if (!m) continue;
+      const lat = parseFloat(m[1]);
+      const lng = parseFloat(m[2]);
+      if (isValidLatLng(lat, lng)) return { lat: lat, lng: lng };
+    }
+  }
+  return null;
+}
+
+function extractGoogleMapsQuery(text) {
+  try {
+    const url = new URL(text.trim());
+    const params = url.searchParams;
+    const q = params.get('q') || params.get('query') || params.get('destination') || params.get('daddr');
+    if (q && !extractCoordinates(q)) return decodeURIComponent(q).replace(/\+/g, ' ').trim();
+    const m = url.pathname.match(/\/place\/([^/]+)/i);
+    if (m) return decodeURIComponent(m[1]).replace(/\+/g, ' ').trim();
+  } catch(e) {}
+  return '';
 }
 
 /* ── Markers ───────────────────────────────────────── */
