@@ -616,6 +616,7 @@
 const GH_KEY = '10eb47ca-323f-45aa-a666-c55978a75e6a';
 const TT_KEY = 'z0q4MOEZiJYluDAhrU2tyW88EuR2Soz0';
 const MAPPLS_KEY = 'odapugtzbztmbxmaeriuasiiscfcqayzhsbf';
+const MAPPLS_PROXY_URL = 'PASTE_PROXY_URL_HERE';
 const CHENNAI_CENTER = [80.2707, 13.0827];
 const NAV_ZOOM = 17;
 const NAV_PITCH = 48;
@@ -1672,6 +1673,14 @@ function maskMapplsUrl(url) {
   return String(url || '').replace(/(access_token=)[^&]+/i, '$1***');
 }
 
+function buildMapplsProxyUrl(params) {
+  if (!MAPPLS_PROXY_URL || MAPPLS_PROXY_URL === 'PASTE_PROXY_URL_HERE') {
+    throw new Error('Mappls proxy missing');
+  }
+  const qs = params.toString();
+  return MAPPLS_PROXY_URL + (MAPPLS_PROXY_URL.indexOf('?') === -1 ? '?' : '&') + qs;
+}
+
 function mapplsListFromResponse(data) {
   return mapplsDetectResultArray(data).items;
 }
@@ -1824,14 +1833,12 @@ async function fetchTomTom(query, signal, useBias) {
 }
 
 async function fetchMappls(query, signal, useBias) {
-  if (!MAPPLS_KEY || MAPPLS_KEY === 'PASTE_MAPPLS_KEY_HERE') throw new Error('Mappls key missing');
   const params = new URLSearchParams({
     query: query,
-    access_token: MAPPLS_KEY,
     region: 'IND'
   });
   if (useBias && userLat && userLng) params.set('location', userLat + ',' + userLng);
-  const url = 'https://search.mappls.com/search/places/autosuggest/json?' + params.toString();
+  const url = buildMapplsProxyUrl(params);
   console.info('Mappls request URL', maskMapplsUrl(url));
   const r = await fetch(url, { signal: signal });
   console.info('Mappls HTTP status', r.status);
@@ -1855,57 +1862,46 @@ async function fetchMappls(query, signal, useBias) {
 }
 
 async function resolveMapplsELoc(eLoc, signal) {
-  if (!MAPPLS_KEY || MAPPLS_KEY === 'PASTE_MAPPLS_KEY_HERE') throw new Error('Mappls key missing');
-  const urls = [
-    'https://search.mappls.com/search/places/place_detail/json?place_id=' + encodeURIComponent(eLoc) + '&access_token=' + encodeURIComponent(MAPPLS_KEY),
-    'https://search.mappls.com/search/places/place_detail/json?eLoc=' + encodeURIComponent(eLoc) + '&access_token=' + encodeURIComponent(MAPPLS_KEY)
-  ];
-  let lastErr = null;
-  for (let i = 0; i < urls.length; i++) {
-    try {
-      console.info('Mappls eLoc request URL', maskMapplsUrl(urls[i]));
-      const r = await fetch(urls[i], { signal: signal });
-      console.info('Mappls eLoc HTTP status', r.status);
-      const text = await r.text();
-      let data = null;
-      try { data = text ? JSON.parse(text) : null; } catch(e) {
-        console.warn('Mappls eLoc raw response was not JSON', text);
-        lastErr = new Error('Mappls detail invalid JSON');
-        continue;
-      }
-      console.info('Mappls eLoc raw JSON response', data);
-      if (!r.ok) {
-        console.warn('Mappls HTTP status', r.status, 'body', data || text);
-        lastErr = new Error('Mappls detail ' + r.status);
-        continue;
-      }
-      const detected = mapplsDetectResultArray(data);
-      console.info('Mappls eLoc detected result array path', detected.path);
-      const hit = detected.items.map(normMappls).filter(function(x) {
-        return isValidLatLng(x.lat, x.lng);
-      })[0];
-      if (hit) return { lat: hit.lat, lng: hit.lng, address: hit.address, name: hit.name };
-      console.warn('Mappls response had no usable coordinates/eLoc', data);
-    } catch(e) {
-      if (e.name === 'AbortError') throw e;
-      lastErr = e;
-    }
+  const params = new URLSearchParams({
+    eLoc: eLoc,
+    region: 'IND'
+  });
+  const url = buildMapplsProxyUrl(params);
+  console.info('Mappls eLoc request URL', maskMapplsUrl(url));
+  const r = await fetch(url, { signal: signal });
+  console.info('Mappls eLoc HTTP status', r.status);
+  const text = await r.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch(e) {
+    console.warn('Mappls eLoc raw response was not JSON', text);
+    throw new Error('Mappls detail invalid JSON');
   }
-  throw lastErr || new Error('Mappls detail failed');
+  console.info('Mappls eLoc raw JSON response', data);
+  if (!r.ok) {
+    console.warn('Mappls HTTP status', r.status, 'body', data || text);
+    throw new Error('Mappls detail ' + r.status);
+  }
+  const detected = mapplsDetectResultArray(data);
+  console.info('Mappls eLoc detected result array path', detected.path);
+  const hit = detected.items.map(normMappls).filter(function(x) {
+    return isValidLatLng(x.lat, x.lng);
+  })[0];
+  if (hit) return { lat: hit.lat, lng: hit.lng, address: hit.address, name: hit.name };
+  console.warn('Mappls response had no usable coordinates/eLoc', data);
+  throw new Error('Mappls detail failed');
 }
 
 async function testMapplsSearch(query) {
-  if (!MAPPLS_KEY || MAPPLS_KEY === 'PASTE_MAPPLS_KEY_HERE') {
-    console.warn('Mappls test cannot run: replace MAPPLS_KEY first');
-    return { raw: null, path: 'missing-key', normalized: [] };
+  if (!MAPPLS_PROXY_URL || MAPPLS_PROXY_URL === 'PASTE_PROXY_URL_HERE') {
+    console.warn('Mappls test cannot run: replace MAPPLS_PROXY_URL first');
+    return { raw: null, path: 'missing-proxy', normalized: [] };
   }
   const params = new URLSearchParams({
     query: query || 'Murugan Idli',
-    access_token: MAPPLS_KEY,
     region: 'IND'
   });
   if (!isGeoQuery(query || '') && userLat && userLng) params.set('location', userLat + ',' + userLng);
-  const url = 'https://search.mappls.com/search/places/autosuggest/json?' + params.toString();
+  const url = buildMapplsProxyUrl(params);
   console.info('Mappls test request URL', maskMapplsUrl(url));
   const r = await fetch(url);
   console.info('Mappls test HTTP status', r.status);
