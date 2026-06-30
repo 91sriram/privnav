@@ -1,4 +1,4 @@
-const CACHE_NAME = 'privnav-maplibre-fork-v1';
+const CACHE_NAME = 'privnav-maplibre-fork-v2';
 
 self.addEventListener('install', function(event) {
   self.skipWaiting();
@@ -29,9 +29,26 @@ self.addEventListener('activate', function(event) {
 
 self.addEventListener('fetch', function(event) {
   if (event.request.method !== 'GET') return;
+
+  const url = new URL(event.request.url);
+  if (url.origin !== self.location.origin) {
+    console.log('SW bypass external request: ' + url.origin);
+    return;
+  }
+
   event.respondWith(
-    fetch(event.request).catch(function() {
-      return caches.match(event.request);
+    caches.match(event.request).then(function(cached) {
+      if (cached) return cached;
+      return fetch(event.request).then(function(response) {
+        if (!response || !response.ok) return response;
+        return response;
+      });
+    }).catch(function() {
+      return new Response('Offline', {
+        status: 503,
+        statusText: 'Service Unavailable',
+        headers: { 'Content-Type': 'text/plain' }
+      });
     })
   );
 });
